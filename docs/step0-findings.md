@@ -83,9 +83,23 @@ Photo live view runs at 30.0 fps no matter which movie mode is selected.
 | 4 | 323 | 29.9 | 17.5 / 30.7 ms | 4.4 ms |
 | 5 | 341 | 29.8 | 17.9 / 31.7 ms | 4.5 ms |
 
-Level 0 visibly smears skin and fabric texture into blocks; level 5 keeps fine detail. In photo live view the
-higher levels cost ~7 ms of transfer time on USB 2 and nothing in frame rate. (In movie live view, quality 5 dropped
-the rate to ~23.5 fps.)
+Level 0 visibly smears skin and fabric texture into blocks; level 5 keeps fine detail. In 7-second runs the higher
+levels cost ~7 ms of transfer time on USB 2 and nothing in frame rate. (In movie live view, quality 5 dropped the
+rate to ~23.5 fps.)
+
+### Sustained run: 12 minutes, photo live view, XGA, quality 5, USB 2
+
+| Metric | Result |
+|---|---|
+| Average unique frame rate | 27.8 fps |
+| Frame interval mean / p95 / σ | 35.9 / 63.3 / 17.0 ms |
+| Transfer round trip p95 / max | 37.3 / 156.9 ms |
+| Errors, bad frames, decoder drops | 0 / 0 / 0 |
+| Live view timed out? | No — ran the full 12 minutes |
+
+Over minutes, quality 5 on a USB 2 cable sits right at the edge: the p95 transfer (37 ms) exceeds the 33 ms frame
+budget, so roughly one frame in twenty is skipped. Milestone 2 will pick the default quality from a sustained test
+(likely level 3–4 on USB 2) and re-test level 5 on a USB 3 cable.
 
 ### Comparison with Nikon Webcam Utility
 
@@ -186,7 +200,8 @@ still be added later if ever needed.
 1. **Default to photo live view**, not movie live view: 4× lower latency and a steady 30 fps. Output is center-cropped
    from 3:2 (1024 × 680) to 16:9 (1024 × 576), with a 3:2 option.
 2. **Turn on exposure preview** automatically in photo live view, or exposure controls will appear to do nothing.
-3. **Default to high JPEG quality** (level 4–5) in photo live view.
+3. **Default to high JPEG quality** in photo live view, chosen from a sustained test (level 5 skips ~5% of frames on
+   USB 2 over 12 minutes; level 3–4 or a USB 3 cable should hold 30 fps).
 4. **Set the live-view size to XGA on every connect** (the camera resets it).
 5. **Mode-aware controls**: one logical "ISO" control maps to the photo or movie property depending on the selector.
 6. **The resolution ceiling is real**, which makes the capture-card path (Milestone 6) the upgrade route for 1080p60.
