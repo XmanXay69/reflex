@@ -11,7 +11,7 @@ packages:
 settings:
   base:
     SWIFT_VERSION: "6.0"
-    MARKETING_VERSION: "0.0.1"
+    MARKETING_VERSION: "0.2.0"
     CURRENT_PROJECT_VERSION: "1"
     MACOSX_DEPLOYMENT_TARGET: "14.0"
     SWIFT_APPROACHABLE_CONCURRENCY: YES
@@ -21,6 +21,34 @@ settings:
     CODE_SIGN_IDENTITY: "-"
     DEVELOPMENT_TEAM: ""
 targets:
+  Reflex:
+    type: application
+    platform: macOS
+    sources:
+      - path: App
+    dependencies:
+      - package: ReflexKit
+        product: ReflexPTP
+      - package: ReflexKit
+        product: ReflexCamera
+      - package: ReflexKit
+        product: ReflexVideo
+    settings:
+      base:
+        PRODUCT_NAME: Reflex
+        PRODUCT_BUNDLE_IDENTIFIER: com.xmanxay.Reflex
+        GENERATE_INFOPLIST_FILE: YES
+        INFOPLIST_KEY_CFBundleDisplayName: Reflex
+        INFOPLIST_KEY_LSApplicationCategoryType: public.app-category.video
+        INFOPLIST_KEY_NSHumanReadableCopyright: "© 2026 Xay. MIT License."
+        ENABLE_HARDENED_RUNTIME: NO
+        SWIFT_DEFAULT_ACTOR_ISOLATION: MainActor
+        COMBINE_HIDPI_IMAGES: YES
+    info:
+      path: App/Info.plist
+      properties:
+        # macOS's camera daemon (ptpcamerad) checks this permission before it lets an app talk to a USB camera.
+        NSRemovableVolumesUsageDescription: "Reflex talks to your camera over USB to show live view and change its settings. It does not read or copy your photos."
   ReflexSpike:
     type: application
     platform: macOS
@@ -44,6 +72,12 @@ targets:
         # macOS's camera daemon (ptpcamerad) checks this permission before it lets an app talk to a USB camera.
         NSRemovableVolumesUsageDescription: "Reflex talks to your camera over USB to show live view and change its settings. It does not read or copy your photos."
 schemes:
+  Reflex:
+    build:
+      targets:
+        Reflex: all
+    run:
+      config: Debug
   ReflexSpike:
     build:
       targets:

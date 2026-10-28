@@ -75,6 +75,7 @@ public final class CameraConnection: NSObject, @unchecked Sendable {
     public let name: String
     public let usbVendorID: Int
     public let usbProductID: Int
+    public let usbLocationID: UInt32
     private weak var discovery: CameraDiscovery?
 
     /// PTP events from the interrupt endpoint (raw USB event containers). Set before or after opening.
@@ -87,6 +88,7 @@ public final class CameraConnection: NSObject, @unchecked Sendable {
         self.name = camera.name ?? "Camera"
         self.usbVendorID = Int(camera.usbVendorID)
         self.usbProductID = Int(camera.usbProductID)
+        self.usbLocationID = UInt32(bitPattern: camera.usbLocationID)
         self.discovery = discovery
         super.init()
     }
