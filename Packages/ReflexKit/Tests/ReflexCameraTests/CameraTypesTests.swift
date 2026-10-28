@@ -34,7 +34,11 @@ import Testing
     @Test func photoShutterIsInTenThousandths() {
         #expect(ControlFormatter.photoShutter(400) == "1/25")
         #expect(ControlFormatter.photoShutter(166) == "1/60")
-        #expect(ControlFormatter.photoShutter(1) == "1/10000")
+        #expect(ControlFormatter.photoShutter(62) == "1/160")
+        #expect(ControlFormatter.photoShutter(31) == "1/320")
+        #expect(ControlFormatter.photoShutter(12) == "1/800")
+        #expect(ControlFormatter.photoShutter(1) == "1/8000")
+        #expect(ControlFormatter.photoShutter(3333) == "1/3")
         #expect(ControlFormatter.photoShutter(10_000) == "1\"")
         #expect(ControlFormatter.photoShutter(13_000) == "1.3\"")
         #expect(ControlFormatter.photoShutter(0xFFFF_FFFF) == "Bulb")

@@ -87,12 +87,23 @@ enum ControlFormatter {
         default: break
         }
         guard v > 0 else { return "\(v)" }
-        if v >= 10_000 {
-            let seconds = Double(v) / 10_000
-            return seconds.rounded() == seconds ? String(format: "%.0f\"", seconds) : String(format: "%.1f\"", seconds)
-        }
-        return "1/\(Int((10_000 / Double(v)).rounded()))"
+        // The camera rounds to whole 1/10 000 s (1/160 s arrives as 62 → "1/161"), so snap to the nearest
+        // standard 1/3-stop speed in log space.
+        let seconds = Double(v) / 10_000
+        let nominal = nominalShutterSpeeds.min { abs(log($0.seconds / seconds)) < abs(log($1.seconds / seconds)) }!
+        // Allow for the camera's rounding to whole units, which is coarse at the fast end (1/8000 s is stored as 1).
+        let tolerance = 0.12 + log(1 + 0.5 / Double(v))
+        return abs(log(nominal.seconds / seconds)) < tolerance ? nominal.label : String(format: "%.4g s", seconds)
     }
+
+    /// Standard 1/3-stop shutter speeds from 1/8000 s to 30 s.
+    static let nominalShutterSpeeds: [(seconds: Double, label: String)] = {
+        let fractions = [8000, 6400, 5000, 4000, 3200, 2500, 2000, 1600, 1250, 1000, 800, 640, 500, 400, 320, 250, 200,
+                         160, 125, 100, 80, 60, 50, 40, 30, 25, 20, 15, 13, 10, 8, 6, 5, 4, 3]
+        let longer: [Double] = [0.4, 0.5, 0.6, 0.8, 1, 1.3, 1.6, 2, 2.5, 3, 4, 5, 6, 8, 10, 13, 15, 20, 25, 30]
+        return fractions.map { (1 / Double($0), "1/\($0)") }
+            + longer.map { ($0, $0 < 1 ? "\(String(format: "%g", $0))\"" : String(format: "%g\"", $0)) }
+    }()
 
     /// Nikon MovieShutterSpeed (0xD1A8): numerator in the high 16 bits, denominator in the low 16 bits.
     static func movieShutter(_ v: Int) -> String {

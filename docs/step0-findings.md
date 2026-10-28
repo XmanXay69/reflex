@@ -206,3 +206,31 @@ still be added later if ever needed.
 5. **Mode-aware controls**: one logical "ISO" control maps to the photo or movie property depending on the selector.
 6. **The resolution ceiling is real**, which makes the capture-card path (Milestone 6) the upgrade route for 1080p60.
 7. **Recommend a USB 3 cable** (5 Gb/s or better) for the extra transfer headroom at high quality.
+
+## Addendum: findings while building Milestone 2 (same evening, dimmer room)
+
+**Exposure preview controls the live-view frame rate in dim light.** With exposure preview off, the D780 brightens
+a dim scene by slowing live view: 14–16 fps, each `GetLiveViewImage` blocking ~50–70 ms until the next frame.
+With exposure preview on (0xD1A5 = 1) it holds 30 fps at the chosen exposure (tested at 1/25 s and 1/60 s, and live
+view still ran at 30 fps with the shutter set to 1/3 s). In daylight, preview-off live view also ran at 30 fps,
+which is why Step 0 didn't see this.
+
+**Switching preview on takes the camera ~9–20 s to settle.** Measured second by second after turning preview on:
+`15 16 16 15 14 17 17 17 17 27 30 30 …`. Restarting live view within the same USB session after it had settled
+gave 30 fps from the second second; a new session (app relaunch) ramps again. Setting preview before
+`StartLiveView` does not skip the ramp. Reflex therefore keeps preview on by default and shows the frame rate, and
+the ramp only appears in dim light.
+
+**A frame pacer can't beat flat-out polling here.** `GetLiveViewImage` returns the newest frame, so polling faster
+than the camera re-transfers the same JPEG. Timing requests to the camera's clock would save bandwidth, but there is
+no cheap "new frame ready" signal: `GetLiveViewCompressedSize` (0x9423) returns a constant 4-byte value and takes
+~56 ms. A first pacer that learned the frame period from its own request timing locked onto every other frame
+(14 fps). Reflex polls back to back, which holds 30 fps.
+
+**Connect time.** The first command after a session opens waited up to ~8 s on this card. Reflex now allows 45 s for
+that first command, retries once, and shows a Try Again button instead of failing.
+
+**Exposure controls work in photo live view** (M mode): shutter (0x500D, 55 values), aperture (0x5007, f/1.8–f/16),
+ISO (0x500F, 31 values), Auto ISO (0xD054) and exposure compensation (0x5010) all apply during live view without
+interrupting it, and the image follows them with exposure preview on. 0x500D is in whole 1/10 000 s, so 1/160 s
+arrives as 62; the app snaps labels to the standard 1/3-stop speeds.

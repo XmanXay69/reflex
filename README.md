@@ -6,8 +6,8 @@ Reflex pulls live view from the camera over USB-C, renders it with Metal, and sh
 OBS's Virtual Camera then carries it to Zoom, Discord and browsers. No capture card and no Apple Developer account
 are needed.
 
-> **Status: Milestone 1 (feasibility spike) done.** The PTP layer and a measurement app exist; the real app is
-> next. See [the Step 0 findings](docs/step0-findings.md) for what the D780 can actually do over USB.
+> **Status: Milestone 2 (viewfinder and live view) in testing**, with exposure controls pulled forward from
+> Milestone 3. See [the Step 0 findings](docs/step0-findings.md) for what the D780 can actually do over USB.
 
 ## What it does (and will do)
 
@@ -34,9 +34,11 @@ are needed.
 git clone https://github.com/XmanXay69/reflex.git
 cd reflex
 xcodegen generate
-xcodebuild -project Reflex.xcodeproj -scheme ReflexSpike -derivedDataPath build build
-open build/Build/Products/Debug/ReflexSpike.app
+xcodebuild -project Reflex.xcodeproj -scheme Reflex -derivedDataPath build build
+open build/Build/Products/Debug/Reflex.app
 ```
+
+Shortcuts: ⌘L live view on/off, ⌥⌘S show/hide controls, ⇧⌘L measure latency.
 
 Camera setup:
 
@@ -83,13 +85,16 @@ Details and step-by-step instructions: [docs/signing.md](docs/signing.md).
 - **Exposure mode and the photo/movie selector are physical controls** and can't be changed from the Mac.
 - **No audio** over USB live view.
 - The first connection can take 6–10 s while macOS catalogs the memory card.
+- **In dim light, live view needs about 10–20 s after connecting to reach 30 fps**, while the camera settles into
+  exposure preview. Turning exposure preview off makes the camera brighten the picture itself, but then it runs at
+  ~15 fps in dim light.
 - Long sessions are limited by the battery; for long streams use a mains adapter (Nikon EP-5B power connector + EH-5 series adapter).
 
 ## Roadmap
 
 1. ✅ **Feasibility spike**: PTP layer, live view, measurements ([findings](docs/step0-findings.md)).
-2. **Viewfinder and live view**: Metal pipeline, VideoToolbox decode, status bar.
-3. **Camera controls**: exposure, white balance, Picture Control, focus, click-to-focus, disconnect handling.
+2. 🧪 **Viewfinder and live view**: Metal pipeline, VideoToolbox decode, status bar, latency test.
+3. **Camera controls**: exposure (done early) · white balance, Picture Control, focus, click-to-focus.
 4. **OBS output**: Syphon server (NDI only if a network use case comes up).
 5. **Polish**: presets ("Desk Stream", "Low Light", "IRL"), overlays, keyboard shortcuts, menu bar toggle.
 6. **Capture-card source**: UVC/HDMI input behind the same `VideoSource` protocol, camera control kept on USB.

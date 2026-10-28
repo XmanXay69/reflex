@@ -26,6 +26,11 @@ struct ExposureSection: View {
                             .toggleStyle(.switch)
                             .controlSize(.small)
                             .disabled(!state.isWritable)
+                    case .aperture:
+                        StepSlider(state: state, title: "Aperture · depth of field",
+                                   caption: "Lower f-number: blurrier background and a brighter picture. Higher: more in focus, darker.") {
+                            model.setControl(.aperture, to: $0)
+                        }
                     default:
                         StepSlider(state: state) { model.setControl(state.control, to: $0) }
                     }
@@ -49,6 +54,8 @@ struct ExposureSection: View {
 /// A slider over a control's discrete camera values, with − / + for single steps. Applies on release.
 struct StepSlider: View {
     let state: ControlState
+    var title: String?
+    var caption: String?
     let apply: (PTPValue) -> Void
     @State private var dragIndex: Double?
 
@@ -60,7 +67,7 @@ struct StepSlider: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
             HStack {
-                Text(state.control.title).foregroundStyle(.secondary)
+                Text(title ?? state.control.title).foregroundStyle(.secondary)
                 Spacer()
                 Text(state.label(for: state.options[min(max(shownIndex, 0), count - 1)]))
                     .monospacedDigit()
@@ -76,6 +83,12 @@ struct StepSlider: View {
                     .labelsHidden()
                     stepButton("plus", by: 1)
                 }
+            }
+            if let caption {
+                Text(caption)
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
         }
         .accessibilityElement(children: .contain)
