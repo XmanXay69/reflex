@@ -98,7 +98,12 @@ struct ViewfinderOverlay: View {
                     progress(title: "Connecting to \(name)…",
                              detail: "macOS reads the memory card first, which can take up to 10 seconds.")
                 case let .failed(message):
-                    self.message(icon: "exclamationmark.triangle", title: "Couldn't connect", detail: message, warning: true)
+                    VStack(spacing: 4) {
+                        self.message(icon: "exclamationmark.triangle", title: "Couldn't connect", detail: message, warning: true)
+                            .frame(maxHeight: 220)
+                        Button("Try Again") { model.retryConnection() }
+                            .controlSize(.large)
+                    }
                 case .connected:
                     connectedState
                 }

@@ -92,6 +92,17 @@ nonisolated final class CameraSession: @unchecked Sendable {
         lock.unlock()
     }
 
+    /// Stops the polling loop but leaves the camera in live view.
+    func stopPolling() async {
+        let task = lock.withLock { () -> Task<Void, Never>? in
+            let t = liveViewTask
+            liveViewTask = nil
+            return t
+        }
+        task?.cancel()
+        await task?.value
+    }
+
     func stopLiveView() async {
         let task = lock.withLock { () -> Task<Void, Never>? in
             let t = liveViewTask

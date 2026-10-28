@@ -46,7 +46,8 @@ public struct PTPTransaction: Sendable {
 /// one at a time, in call order: PTP has no pipelining, and ordering keeps timing measurements honest.
 /// Swappable: ImageCaptureCore passthrough today; libgphoto2/libusb could slot in behind the same protocol.
 public protocol PTPTransport: AnyObject, Sendable {
-    func transact(_ code: PTPOperationCode, params: [UInt32], dataOut: Data?) async throws -> PTPTransaction
+    /// `timeout` nil uses the transport's default.
+    func transact(_ code: PTPOperationCode, params: [UInt32], dataOut: Data?, timeout: Double?) async throws -> PTPTransaction
 }
 
 /// Monotonic host time in seconds (mach_absolute_time based; same clock as CACurrentMediaTime).
@@ -58,16 +59,23 @@ public func hostTime() -> Double {
 // MARK: - Typed helpers
 
 extension PTPTransport {
+    public func transact(_ code: PTPOperationCode, params: [UInt32], dataOut: Data?) async throws -> PTPTransaction {
+        try await transact(code, params: params, dataOut: dataOut, timeout: nil)
+    }
+
     /// Runs a transaction and throws unless the camera answers OK.
     @discardableResult
-    public func run(_ code: PTPOperationCode, _ params: [UInt32] = [], dataOut: Data? = nil) async throws -> PTPTransaction {
-        let t = try await transact(code, params: params, dataOut: dataOut)
+    public func run(_ code: PTPOperationCode, _ params: [UInt32] = [], dataOut: Data? = nil,
+                    timeout: Double? = nil) async throws -> PTPTransaction {
+        let t = try await transact(code, params: params, dataOut: dataOut, timeout: timeout)
         guard t.response.code.isOK else { throw PTPError.response(t.response.code, operation: code) }
         return t
     }
 
-    public func deviceInfo() async throws -> PTPDeviceInfo {
-        try PTPDeviceInfo(decoding: try await run(.getDeviceInfo).data)
+    /// The first command after a session opens can wait while macOS catalogs the memory card (6–10 s measured,
+    /// longer with a full card), so this gets a generous timeout.
+    public func deviceInfo(timeout: Double = 45) async throws -> PTPDeviceInfo {
+        try PTPDeviceInfo(decoding: try await run(.getDeviceInfo, timeout: timeout).data)
     }
 
     public func propertyDescriptor(_ code: PTPPropertyCode) async throws -> PTPPropertyDescriptor {

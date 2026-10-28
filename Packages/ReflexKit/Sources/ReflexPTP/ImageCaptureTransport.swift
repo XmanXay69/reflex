@@ -21,13 +21,16 @@ public final class ImageCaptureTransport: NSObject, PTPTransport, @unchecked Sen
         let code: PTPOperationCode
         let params: [UInt32]
         let dataOut: Data?
+        let timeout: Double?
         private var continuation: CheckedContinuation<PTPTransaction, Error>?
         private let lock = NSLock()
 
-        init(code: PTPOperationCode, params: [UInt32], dataOut: Data?, continuation: CheckedContinuation<PTPTransaction, Error>) {
+        init(code: PTPOperationCode, params: [UInt32], dataOut: Data?, timeout: Double?,
+             continuation: CheckedContinuation<PTPTransaction, Error>) {
             self.code = code
             self.params = params
             self.dataOut = dataOut
+            self.timeout = timeout
             self.continuation = continuation
         }
 
@@ -49,9 +52,9 @@ public final class ImageCaptureTransport: NSObject, PTPTransport, @unchecked Sen
         self.timeout = timeout
     }
 
-    public func transact(_ code: PTPOperationCode, params: [UInt32], dataOut: Data?) async throws -> PTPTransaction {
+    public func transact(_ code: PTPOperationCode, params: [UInt32], dataOut: Data?, timeout: Double?) async throws -> PTPTransaction {
         try await withCheckedThrowingContinuation { continuation in
-            let request = Request(code: code, params: params, dataOut: dataOut, continuation: continuation)
+            let request = Request(code: code, params: params, dataOut: dataOut, timeout: timeout, continuation: continuation)
             lock.lock()
             if isClosed {
                 lock.unlock()
@@ -89,7 +92,7 @@ public final class ImageCaptureTransport: NSObject, PTPTransport, @unchecked Sen
             let timer = DispatchWorkItem { [weak self] in
                 if request.resume(.failure(PTPError.timedOut(request.code))) { self?.didFinish() }
             }
-            DispatchQueue.global(qos: .userInteractive).asyncAfter(deadline: .now() + timeout, execute: timer)
+            DispatchQueue.global(qos: .userInteractive).asyncAfter(deadline: .now() + (request.timeout ?? timeout), execute: timer)
 
             camera.requestSendPTPCommand(command, outData: request.dataOut) { [weak self] data, response, error in
                 let completedAt = hostTime()

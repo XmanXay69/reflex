@@ -8,8 +8,9 @@ struct SidePanel: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 28) {
-                cameraSection
+                ExposureSection(model: model)
                 outputSection
+                cameraSection
                 diagnosticsSection
             }
             .padding(20)
@@ -128,13 +129,9 @@ struct SettingsView: View {
             Picker("Appearance", selection: $model.appearance) {
                 ForEach(Appearance.allCases) { Text($0.label).tag($0) }
             }
-            Toggle("Pace USB requests to the camera's frame rate", isOn: $model.pacing)
-            Text("Saves USB bandwidth and lowers delay. Takes effect the next time the camera connects.")
-                .font(.callout)
-                .foregroundStyle(.secondary)
         }
         .formStyle(.grouped)
-        .frame(width: 440)
+        .frame(width: 380)
         .preferredColorScheme(model.appearance.colorScheme)
     }
 }

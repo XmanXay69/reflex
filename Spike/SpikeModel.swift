@@ -401,6 +401,67 @@ final class SpikeModel {
         summary.append("- Exposure preview: " + lines.joined(separator: "; "))
     }
 
+    /// What does Nikon GetLiveViewCompressedSize (0x9423) return, how fast, and does it track new frames?
+    func compressedSizeProbe() async {
+        guard let session else { return }
+        if !session.isLiveViewRunning { startLiveView() }
+        _ = await waitForFrames()
+        await session.stopPolling()
+        let t = session.transport
+        if let first = try? await t.transact(PTPOperationCode(0x9423), params: [], dataOut: nil) {
+            log("0x9423 → \(first.response.code), params \(first.response.params), data \(first.data.count) bytes \(first.data.prefix(16).map { String(format: "%02x", $0) }.joined()), RTT \(String(format: "%.2f", first.roundTrip * 1000)) ms")
+        }
+        // 1) How often does the value change, and how cheap is the call?
+        var rtts: [Double] = [], changes = 0, last: Data?
+        let end = hostTime() + 3
+        while hostTime() < end {
+            guard let r = try? await t.transact(PTPOperationCode(0x9423), params: [], dataOut: nil) else { break }
+            rtts.append(r.roundTrip)
+            let value = r.data + Data(r.response.params.flatMap { withUnsafeBytes(of: $0) { Array($0) } })
+            if let last, value != last { changes += 1 }
+            last = value
+        }
+        log(String(format: "0x9423 polled %d times in 3 s: RTT median %.2f ms, value changed %.1f /s", rtts.count, median(rtts) * 1000, Double(changes) / 3))
+        // 2) Poll the size until it changes, then fetch the image: are fetched frames always new?
+        var fetched = 0, repeats = 0, lastHash = 0, intervals: [Double] = [], lastNew = 0.0, lastSize: Data?
+        let end2 = hostTime() + 5
+        while hostTime() < end2 {
+            guard let r = try? await t.transact(PTPOperationCode(0x9423), params: [], dataOut: nil) else { break }
+            let value = r.data + Data(r.response.params.flatMap { withUnsafeBytes(of: $0) { Array($0) } })
+            defer { lastSize = value }
+            guard let lastSize, value != lastSize else { continue }
+            guard let img = try? await t.transact(.nikonGetLiveViewImage, params: [], dataOut: nil),
+                  let frame = NikonLiveViewFrame(payload: img.data) else { continue }
+            var hasher = Hasher()
+            frame.jpeg.withUnsafeBytes { hasher.combine(bytes: $0) }
+            let h = hasher.finalize()
+            fetched += 1
+            if h == lastHash { repeats += 1 } else {
+                if lastNew > 0 { intervals.append(img.completedAt - lastNew) }
+                lastNew = img.completedAt
+            }
+            lastHash = h
+        }
+        let sortedIntervals = intervals.sorted()
+        log(String(format: "Size-gated fetch, 5 s: %d fetched, %d repeats, %.1f fps new, interval p50 %.1f / p95 %.1f ms",
+                   fetched, repeats, Double(fetched - repeats) / 5, percentile(sortedIntervals, 0.5) * 1000, percentile(sortedIntervals, 0.95) * 1000))
+        session.startLiveView()
+    }
+
+    /// Unique fps per second, to see how fast live view settles.
+    func timeline(seconds: Int) async {
+        guard let session else { return }
+        var values: [String] = []
+        for _ in 0..<seconds {
+            session.stats.reset()
+            try? await Task.sleep(for: .seconds(1))
+            values.append(String(format: "%.0f", Double(session.stats.snapshot().uniqueFrames)))
+        }
+        let line = "Timeline \(latencyContext)fps/s: " + values.joined(separator: " ")
+        log(line)
+        summary.append("- " + line)
+    }
+
     /// For each live-view AF-area mode: can ChangeAfArea move the AF frame?
     func afAreaSweep() async {
         guard let session else { return }
@@ -463,7 +524,7 @@ final class SpikeModel {
     @ObservationIgnored private var latencyContext = ""
 
     /// `set=<code hex>:<type>:<value>`, e.g. `set=D0A0:u64:0x07800438003C0000` or `set=D1AC:u8:2`.
-    func setStep(_ spec: String) async {
+    func setStep(_ spec: String, settle: Double = 2.5) async {
         guard let session else { return }
         let parts = spec.split(separator: ":").map(String.init)
         guard parts.count == 3, let code = UInt16(parts[0], radix: 16) else { return log("Bad set step \(spec)") }
@@ -480,8 +541,10 @@ final class SpikeModel {
         } catch {
             log("Set \(property) failed: \(error)")
         }
-        try? await Task.sleep(for: .seconds(2.5))
-        session.stats.reset()
+        if settle > 0 {
+            try? await Task.sleep(for: .seconds(settle))
+            session.stats.reset()
+        }
     }
     @ObservationIgnored private var goIndex = 0
 
@@ -695,7 +758,19 @@ final class SpikeModel {
             case "expsim": await exposurePreviewTest()
             case "focus": await focusTest()
             case "afsweep": await afAreaSweep()
+            case "csize": await compressedSizeProbe()
             case let step where step.hasPrefix("set="): await setStep(String(step.dropFirst(4)))
+            case let step where step.hasPrefix("setq="): await setStep(String(step.dropFirst(5)), settle: 0)
+            case let step where step.hasPrefix("timeline="):
+                await timeline(seconds: Int(step.dropFirst(9)) ?? 20)
+            case "lvoff":
+                await session?.stopLiveView()
+                liveViewRunning = false
+            case "lvon":
+                session?.stats.reset()
+                session?.startLiveView()
+            case let step where step.hasPrefix("sleep="):
+                try? await Task.sleep(for: .milliseconds(Int(step.dropFirst(6)) ?? 0))
             case "latency": await latency()
             case "stop": await stopLiveView()
             default: log("Unknown step \(step)")
