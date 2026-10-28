@@ -1,0 +1,35 @@
+# macOS
+.DS_Store
+
+# Xcode (the project is generated from project.yml by XcodeGen)
+*.xcodeproj/
+build/
+DerivedData/
+*.xcuserstate
+xcuserdata/
+*.xcscmblueprint
+*.xccheckout
+*.moved-aside
+*.hmap
+*.dSYM.zip
+*.dSYM
+
+# SwiftPM
+.build/
+.swiftpm/
+Packages/*/.build/
+Package.resolved
+
+# Vendored framework build output
+Vendor/build/
+
+# Release output
+dist/
+*.zip
+
+# Spike output (camera dumps, frame samples, benchmark reports)
+spike-output/
+
+# Local secrets — never commit
+*.env
+.env*
