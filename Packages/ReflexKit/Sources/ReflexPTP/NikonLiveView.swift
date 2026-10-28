@@ -33,6 +33,9 @@ public struct NikonLiveViewFrame: Sendable {
         return UInt32(hi) << 16 | UInt32(lo)
     }
 
+    /// Decoded header fields, or nil if the header is too short to hold them.
+    public var info: NikonLiveViewInfo? { NikonLiveViewInfo(frame: self) }
+
     /// Scans for FF D8 FF (SOI followed by the first marker).
     static func findJPEGStart(in data: Data, limit: Int) -> Int? {
         let end = min(data.count, limit) - 2
@@ -66,5 +69,51 @@ public struct NikonLiveViewFrame: Sendable {
             }
             return nil
         }
+    }
+}
+
+/// Fields at the start of the GetLiveViewImage header, all big-endian. Layout verified on a D780
+/// (firmware 1.02, 384-byte header) in both photo and movie live view:
+///
+///     0  UINT32  header length after this field (376)
+///     4  UINT32  JPEG byte count
+///     8  UINT16  JPEG width, height
+///    12  UINT16  sensor ("whole") width, height  — coordinate space for ChangeAfArea
+///    16  UINT16  display area width, height
+///    20  UINT16  display area center x, y
+///    24  UINT16  AF frame width, height
+///    28  UINT16  AF frame center x, y
+public struct NikonLiveViewInfo: Sendable, Equatable {
+    public var jpegByteCount: Int
+    public var jpegWidth: Int
+    public var jpegHeight: Int
+    public var sensorWidth: Int
+    public var sensorHeight: Int
+    public var displayWidth: Int
+    public var displayHeight: Int
+    public var displayCenterX: Int
+    public var displayCenterY: Int
+    public var afWidth: Int
+    public var afHeight: Int
+    public var afCenterX: Int
+    public var afCenterY: Int
+
+    init?(frame: NikonLiveViewFrame) {
+        guard frame.jpegOffset >= 32,
+              let jpegBytes = frame.headerU32(at: 4),
+              let w = frame.headerU16(at: 8), let h = frame.headerU16(at: 10),
+              let sw = frame.headerU16(at: 12), let sh = frame.headerU16(at: 14),
+              let dw = frame.headerU16(at: 16), let dh = frame.headerU16(at: 18),
+              let dx = frame.headerU16(at: 20), let dy = frame.headerU16(at: 22),
+              let aw = frame.headerU16(at: 24), let ah = frame.headerU16(at: 26),
+              let ax = frame.headerU16(at: 28), let ay = frame.headerU16(at: 30),
+              sw > 0, sh > 0 else { return nil }
+        jpegByteCount = Int(jpegBytes)
+        jpegWidth = Int(w); jpegHeight = Int(h)
+        sensorWidth = Int(sw); sensorHeight = Int(sh)
+        displayWidth = Int(dw); displayHeight = Int(dh)
+        displayCenterX = Int(dx); displayCenterY = Int(dy)
+        afWidth = Int(aw); afHeight = Int(ah)
+        afCenterX = Int(ax); afCenterY = Int(ay)
     }
 }

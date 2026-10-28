@@ -9,6 +9,8 @@ import VideoToolbox
 nonisolated struct DecodedFrame: @unchecked Sendable {
     var image: CGImage
     var meanLuma: Double
+    /// Mean red / mean blue of the central region (white-balance probe).
+    var redBlueRatio: Double
     var arrivedAt: Double
     var decodedAt: Double
     var decodeSeconds: Double
@@ -46,7 +48,8 @@ nonisolated final class FrameDecoder: @unchecked Sendable {
             let t0 = hostTime()
             guard let image = Self.decodeImageIO(frame.frame.jpeg) else { continue }
             let t1 = hostTime()
-            onDecoded(DecodedFrame(image: image, meanLuma: Self.meanLuma(image), arrivedAt: frame.arrivedAt,
+            let probe = Self.probe(image)
+            onDecoded(DecodedFrame(image: image, meanLuma: probe.luma, redBlueRatio: probe.redBlue, arrivedAt: frame.arrivedAt,
                                    decodedAt: t1, decodeSeconds: t1 - t0, sequence: frame.sequence))
         }
     }
@@ -56,8 +59,8 @@ nonisolated final class FrameDecoder: @unchecked Sendable {
         return CGImageSourceCreateImageAtIndex(source, 0, [kCGImageSourceShouldCacheImmediately: true] as CFDictionary)
     }
 
-    /// Mean luma (0...1) of the central region, from a 16×16 downsample.
-    static func meanLuma(_ image: CGImage) -> Double {
+    /// Mean luma (0...1) and red/blue ratio of the central region, from a 16×16 downsample.
+    static func probe(_ image: CGImage) -> (luma: Double, redBlue: Double) {
         let side = 16
         var pixels = [UInt8](repeating: 0, count: side * side * 4)
         let drew = pixels.withUnsafeMutableBytes { buffer -> Bool in
@@ -68,17 +71,18 @@ nonisolated final class FrameDecoder: @unchecked Sendable {
             ctx.draw(image, in: CGRect(x: 0, y: 0, width: side, height: side))
             return true
         }
-        guard drew else { return 0 }
-        var sum = 0.0
-        var count = 0.0
+        guard drew else { return (0, 1) }
+        var sum = 0.0, red = 0.0, blue = 0.0, count = 0.0
         for y in 4..<12 {
             for x in 4..<12 {
                 let i = (y * side + x) * 4
                 sum += 0.2126 * Double(pixels[i]) + 0.7152 * Double(pixels[i + 1]) + 0.0722 * Double(pixels[i + 2])
+                red += Double(pixels[i])
+                blue += Double(pixels[i + 2])
                 count += 1
             }
         }
-        return sum / count / 255
+        return (sum / count / 255, red / max(blue, 1))
     }
 }
 

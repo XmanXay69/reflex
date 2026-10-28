@@ -91,6 +91,22 @@ import Testing
         #expect(frame.jpegDimensions?.height == 576)
     }
 
+    /// Header values as captured from a D780 in photo live view at XGA.
+    @Test func decodesD780HeaderFields() throws {
+        var header = [UInt8](repeating: 0, count: 384)
+        let fields: [(Int, UInt16)] = [(8, 1024), (10, 680), (12, 6048), (14, 4024), (16, 6048), (18, 4024),
+                                       (20, 3024), (22, 2012), (24, 285), (26, 308), (28, 3024), (30, 2012)]
+        for (offset, value) in fields { header[offset] = UInt8(value >> 8); header[offset + 1] = UInt8(value & 0xFF) }
+        header[3] = 0x78 // 376
+        header[6] = 0x00; header[7] = UInt8(Self.jpegStub.count)
+        let info = try #require(NikonLiveViewFrame(payload: Data(header + Self.jpegStub))?.info)
+        #expect(info.jpegByteCount == Self.jpegStub.count)
+        #expect(info.jpegWidth == 1024 && info.jpegHeight == 680)
+        #expect(info.sensorWidth == 6048 && info.sensorHeight == 4024)
+        #expect(info.afWidth == 285 && info.afHeight == 308)
+        #expect(info.afCenterX == 3024 && info.afCenterY == 2012)
+    }
+
     @Test func rejectsPayloadWithoutJPEG() {
         #expect(NikonLiveViewFrame(payload: Data(repeating: 0, count: 600)) == nil)
     }

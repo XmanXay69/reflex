@@ -38,6 +38,11 @@ targets:
         INFOPLIST_KEY_NSHumanReadableCopyright: "© 2026 Xay. MIT License."
         ENABLE_HARDENED_RUNTIME: NO
         SWIFT_DEFAULT_ACTOR_ISOLATION: MainActor
+    info:
+      path: Spike/Info.plist
+      properties:
+        # macOS's camera daemon (ptpcamerad) checks this permission before it lets an app talk to a USB camera.
+        NSRemovableVolumesUsageDescription: "Reflex talks to your camera over USB to show live view and change its settings. It does not read or copy your photos."
 schemes:
   ReflexSpike:
     build:

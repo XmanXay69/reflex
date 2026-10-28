@@ -14,6 +14,8 @@ public final class CameraDiscovery: NSObject, @unchecked Sendable {
     private var browser: ICDeviceBrowser?
     private var connections: [ObjectIdentifier: CameraConnection] = [:]
     private let onEvent: @Sendable (Event) -> Void
+    /// Optional diagnostics hook (browser lifecycle, session results).
+    public var debug: (@Sendable (String) -> Void)?
 
     public init(thread: RunLoopThread = RunLoopThread(name: "reflex.camera"), onEvent: @escaping @Sendable (Event) -> Void) {
         self.thread = thread
@@ -29,6 +31,7 @@ public final class CameraDiscovery: NSObject, @unchecked Sendable {
                 rawValue: ICDeviceTypeMask.camera.rawValue | ICDeviceLocationTypeMask.local.rawValue)!
             browser.start()
             self.browser = browser
+            self.debug?("Browser started (browsing: \(browser.isBrowsing))")
         }
     }
 
@@ -41,12 +44,17 @@ public final class CameraDiscovery: NSObject, @unchecked Sendable {
         }
     }
 
+    public func deviceBrowserDidEnumerateLocalDevices(_ browser: ICDeviceBrowser) {
+        debug?("Browser finished enumerating local devices (\(browser.devices?.count ?? 0))")
+    }
+
     fileprivate func opened(_ connection: CameraConnection) { onEvent(.connected(connection)) }
     fileprivate func failed(_ message: String) { onEvent(.failed(message)) }
 }
 
 extension CameraDiscovery: ICDeviceBrowserDelegate {
     public func deviceBrowser(_ browser: ICDeviceBrowser, didAdd device: ICDevice, moreComing: Bool) {
+        debug?("Browser found \(device.name ?? "a device") (\(device.transportType ?? "unknown transport"))")
         guard let camera = device as? ICCameraDevice else { return }
         let connection = CameraConnection(camera: camera, thread: thread, discovery: self)
         connections[ObjectIdentifier(camera)] = connection

@@ -87,6 +87,7 @@ final class SpikeModel {
         let discovery = CameraDiscovery { [weak self] event in
             Task { @MainActor in self?.handle(event) }
         }
+        discovery.debug = { [weak self] line in Task { @MainActor in self?.log(line) } }
         self.discovery = discovery
         discovery.start()
         statsTimer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
@@ -114,9 +115,15 @@ final class SpikeModel {
                 Task { @MainActor in
                     self?.latencyTest.feed(decoded)
                     self?.lastLuma = decoded.meanLuma
+                    self?.probes.append((decoded.decodedAt, decoded.meanLuma, decoded.redBlueRatio))
+                    if (self?.probes.count ?? 0) > 300 { self?.probes.removeFirst() }
                 }
             }
-            session.onFrame { decoder.submit($0) }
+            let latest = latestFrame
+            session.onFrame { frame in
+                latest.set(frame)
+                decoder.submit(frame)
+            }
             session.onEvents { [weak self] events in
                 let text = events.map { "\($0.code.name ?? $0.code.hex)(\($0.params.map { String(format: "0x%04X", $0) }.joined(separator: ",")))" }
                 Task { @MainActor in
@@ -284,6 +291,255 @@ final class SpikeModel {
         }
     }
 
+    /// Sets `property` to each value in turn during live view, measures, and restores the original.
+    private func sweep(_ name: String, property: PTPPropertyCode, values: [PTPValue],
+                       label: (PTPValue) -> String, settle: Double = 1.5) async {
+        guard let session else { return log("No camera") }
+        activity = "Sweep: \(name)…"
+        defer { activity = nil }
+        if !session.isLiveViewRunning { startLiveView() }
+        guard await waitForFrames() else { return log("\(name): no frames") }
+        let transport = session.transport
+        guard let desc = try? await transport.propertyDescriptor(property) else { return log("\(name): \(property) unsupported") }
+        _ = try? await transport.setPropertyValue(.nikonLiveViewImageSize, .unsigned(3), type: .uint8)
+
+        var rows: [BenchmarkReport.Row] = []
+        for value in values {
+            do {
+                try await transport.setPropertyValue(property, value, type: desc.dataType)
+            } catch {
+                log("\(name) \(label(value)): set failed during live view (\(error)); retrying with live view off")
+                await session.stopLiveView()
+                do { try await transport.setPropertyValue(property, value, type: desc.dataType) }
+                catch { log("\(name) \(label(value)): rejected (\(error))"); session.startLiveView(); continue }
+                session.startLiveView()
+            }
+            try? await Task.sleep(for: .seconds(settle))
+            if !session.isLiveViewRunning { session.startLiveView(); _ = await waitForFrames() }
+            session.stats.reset()
+            saveSamples(label: "\(name)-\(label(value))", count: 2)
+            try? await Task.sleep(for: .seconds(options.benchSeconds))
+            let s = session.stats.snapshot()
+            rows.append(.init(liveViewImageSize: label(value), stats: s))
+            let line = String(format: "%@ %@: %dx%d, %.1f fps unique, RTT p50 %.1f / p95 %.1f ms, %.1f KB/frame, %.1f MB/s, decode %.2f ms",
+                              name, label(value), s.width, s.height, s.uniqueFPS, s.rttP50Ms, s.rttP95Ms,
+                              s.payloadMeanKB, s.throughputMBps, s.decodeMeanMs)
+            log(line)
+            summary.append("- " + line)
+        }
+        do {
+            try await transport.setPropertyValue(property, desc.current, type: desc.dataType)
+            log("\(name): restored \(property) to \(desc.current)")
+        } catch {
+            log("\(name): could not restore \(property) to \(desc.current): \(error)")
+        }
+        ReportWriter.write(BenchmarkReport(context: ["property": property.description], rows: rows),
+                           to: outDir.appending(path: "sweep-\(name).json"))
+    }
+
+    /// Nikon MovScreenSize (0xD0A0) packs width, height and frame rate into a UINT64.
+    static func movieModeLabel(_ v: PTPValue) -> String {
+        guard case let .unsigned(raw) = v else { return v.description }
+        return "\(raw >> 48 & 0xFFFF)x\(raw >> 32 & 0xFFFF)p\(raw >> 16 & 0xFFFF)" + (raw & 0xFFFF != 0 ? "-crop" : "")
+    }
+
+    func movieSweep() async {
+        let modes: [UInt64] = [0x0F00_0870_0018_0000, 0x0780_0438_001E_0000, 0x0780_0438_003C_0000, 0x0780_0438_0078_0000]
+        await sweep("movie", property: PTPPropertyCode(0xD0A0), values: modes.map { .unsigned($0) },
+                    label: Self.movieModeLabel, settle: 2.5)
+    }
+
+    func compressionSweep() async {
+        await sweep("compression", property: .nikonLiveViewImageCompression, values: (0...5).map { .unsigned(UInt64($0)) },
+                    label: { "q\($0)" })
+    }
+
+    @ObservationIgnored private var originalMovieMode: PTPValue?
+    @ObservationIgnored private var latencyRuns = 0
+    @ObservationIgnored private var probes: [(t: Double, luma: Double, redBlue: Double)] = []
+    @ObservationIgnored private let latestFrame = LatestFrame()
+
+    private func probeAverage(seconds: Double = 0.8) async -> (luma: Double, redBlue: Double) {
+        try? await Task.sleep(for: .seconds(seconds))
+        let recent = probes.filter { $0.t > hostTime() - seconds }
+        guard !recent.isEmpty else { return (0, 0) }
+        return (median(recent.map(\.luma)), median(recent.map(\.redBlue)))
+    }
+
+    /// Does the live-view image follow exposure and white-balance settings?
+    func exposurePreviewTest() async {
+        guard let session else { return }
+        if !session.isLiveViewRunning { startLiveView() }
+        _ = await waitForFrames()
+        let t = session.transport
+        let movie = (try? await t.propertyValue(.nikonLiveViewSelector, type: .uint8))?.int == 1
+        if let d = try? await t.propertyDescriptor(.nikonLiveViewExposurePreview) {
+            log("LiveViewExposurePreview: \(d.current) writable \(d.isWritable) form \(d.form)")
+        }
+        let isoCode: PTPPropertyCode = movie ? .nikonMovieISO : .exposureIndex
+        let wbCode: PTPPropertyCode = movie ? .nikonMovieWhiteBalance : .whiteBalance
+        var lines: [String] = ["Live view: \(movie ? "movie" : "photo")"]
+
+        if let iso = try? await t.propertyDescriptor(isoCode), let values = iso.allowedValues, let cur = iso.current.int,
+           let lower = values.compactMap(\.int).filter({ $0 <= cur / 4 }).max() {
+            let before = await probeAverage()
+            _ = try? await t.setPropertyValue(isoCode, .unsigned(UInt64(lower)), type: iso.dataType)
+            try? await Task.sleep(for: .seconds(1))
+            let after = await probeAverage()
+            _ = try? await t.setPropertyValue(isoCode, iso.current, type: iso.dataType)
+            lines.append(String(format: "ISO %d → %d (−2 EV): luma %.3f → %.3f", cur, lower, before.luma, after.luma))
+        }
+        if let wb = try? await t.propertyDescriptor(wbCode), wb.allowedValues?.contains(.unsigned(6)) == true {
+            let before = await probeAverage()
+            _ = try? await t.setPropertyValue(wbCode, .unsigned(6), type: wb.dataType)
+            try? await Task.sleep(for: .seconds(1))
+            let after = await probeAverage()
+            _ = try? await t.setPropertyValue(wbCode, wb.current, type: wb.dataType)
+            lines.append(String(format: "WB %@ → 6 (incandescent): red/blue %.2f → %.2f", wb.current.description, before.redBlue, after.redBlue))
+        }
+        for line in lines { log("Exposure preview: " + line) }
+        summary.append("- Exposure preview: " + lines.joined(separator: "; "))
+    }
+
+    /// For each live-view AF-area mode: can ChangeAfArea move the AF frame?
+    func afAreaSweep() async {
+        guard let session else { return }
+        if !session.isLiveViewRunning { startLiveView() }
+        _ = await waitForFrames()
+        let t = session.transport
+        guard let desc = try? await t.propertyDescriptor(.nikonLiveViewAFArea), let values = desc.allowedValues,
+              let info = latestFrame.get()?.frame.info else { return log("AF area sweep: unavailable") }
+        var lines: [String] = []
+        for value in values {
+            let set = try? await t.transact(.setDevicePropValue, params: [UInt32(PTPPropertyCode.nikonLiveViewAFArea.rawValue)],
+                                            dataOut: try? PTPWriter.encode(value, as: desc.dataType))
+            try? await Task.sleep(for: .milliseconds(600))
+            let x = UInt32(info.sensorWidth / 4), y = UInt32(info.sensorHeight / 3)
+            let move = try? await t.transact(.nikonChangeAfArea, params: [x, y], dataOut: nil)
+            try? await Task.sleep(for: .milliseconds(600))
+            let after = latestFrame.get()?.frame.info
+            lines.append("AFArea \(value) [set \(set?.response.code.name ?? "?")]: move → \(move?.response.code.name ?? "?"), AF frame \(after.map { "\($0.afWidth)x\($0.afHeight) @ (\($0.afCenterX),\($0.afCenterY))" } ?? "?")")
+        }
+        _ = try? await t.setPropertyValue(.nikonLiveViewAFArea, desc.current, type: desc.dataType)
+        _ = try? await t.transact(.nikonChangeAfArea, params: [UInt32(info.sensorWidth / 2), UInt32(info.sensorHeight / 2)], dataOut: nil)
+        for line in lines { log("AF sweep: " + line) }
+        summary.append("- AF sweep: " + lines.joined(separator: "; "))
+    }
+
+    /// Click-to-focus feasibility: move the AF area, check the header follows, run AF, nudge manual focus.
+    func focusTest() async {
+        guard let session else { return }
+        if !session.isLiveViewRunning { startLiveView() }
+        _ = await waitForFrames()
+        let t = session.transport
+        guard let info = latestFrame.get()?.frame.info else { return log("Focus: no header info") }
+        var lines: [String] = []
+        for code in [PTPPropertyCode.nikonLiveViewAFArea, .nikonLiveViewAFFocus, .nikonAutofocusMode, PTPPropertyCode(0xD1F8), PTPPropertyCode(0xD1FA)] {
+            if let v = try? await t.propertyDescriptor(code) { lines.append("\(code.hex)=\(v.current)\(v.isWritable ? "" : " (ro)")") }
+        }
+        let target = (x: UInt32(info.sensorWidth / 4), y: UInt32(info.sensorHeight / 2))
+        let move = try? await t.transact(.nikonChangeAfArea, params: [target.x, target.y], dataOut: nil)
+        try? await Task.sleep(for: .milliseconds(500))
+        let moved = latestFrame.get()?.frame.info
+        lines.append("ChangeAfArea(\(target.x),\(target.y)) → \(move?.response.code.description ?? "error"); header AF center (\(info.afCenterX),\(info.afCenterY)) → (\(moved?.afCenterX ?? -1),\(moved?.afCenterY ?? -1))")
+
+        let started = hostTime()
+        let af = try? await t.transact(.nikonAfDrive, params: [], dataOut: nil)
+        var ready = "n/a"
+        if af?.response.code.isOK == true {
+            do { try await t.nikonWaitUntilReady(timeout: 5); ready = "OK" } catch { ready = "\(error)" }
+        }
+        lines.append(String(format: "AfDrive → %@, DeviceReady %@ after %.0f ms", af?.response.code.description ?? "error", ready, (hostTime() - started) * 1000))
+
+        for (direction, label) in [(UInt32(1), "near"), (UInt32(2), "far")] {
+            let mf = try? await t.transact(.nikonMfDrive, params: [direction, 200], dataOut: nil)
+            if mf?.response.code.isOK == true { try? await t.nikonWaitUntilReady(timeout: 3) }
+            lines.append("MfDrive(\(label), 200) → \(mf?.response.code.description ?? "error")")
+        }
+        _ = try? await t.transact(.nikonChangeAfArea, params: [UInt32(info.afCenterX), UInt32(info.afCenterY)], dataOut: nil)
+        for line in lines { log("Focus: " + line) }
+        summary.append("- Focus: " + lines.joined(separator: "; "))
+    }
+    @ObservationIgnored private var latencyContext = ""
+
+    /// `set=<code hex>:<type>:<value>`, e.g. `set=D0A0:u64:0x07800438003C0000` or `set=D1AC:u8:2`.
+    func setStep(_ spec: String) async {
+        guard let session else { return }
+        let parts = spec.split(separator: ":").map(String.init)
+        guard parts.count == 3, let code = UInt16(parts[0], radix: 16) else { return log("Bad set step \(spec)") }
+        let types: [String: PTPDataType] = ["u8": .uint8, "u16": .uint16, "u32": .uint32, "u64": .uint64, "i16": .int16]
+        guard let type = types[parts[1]] else { return log("Bad type in \(spec)") }
+        let raw = parts[2].hasPrefix("0x") ? UInt64(parts[2].dropFirst(2), radix: 16) : UInt64(parts[2])
+        guard let raw else { return log("Bad value in \(spec)") }
+        let property = PTPPropertyCode(code)
+        let value = PTPValue.unsigned(raw)
+        do {
+            try await session.transport.setPropertyValue(property, value, type: type)
+            latencyContext = "[\(property.hex)=\(code == 0xD0A0 ? Self.movieModeLabel(value) : value.description)] "
+            log("Set \(property) = \(code == 0xD0A0 ? Self.movieModeLabel(value) : value.description)")
+        } catch {
+            log("Set \(property) failed: \(error)")
+        }
+        try? await Task.sleep(for: .seconds(2.5))
+        session.stats.reset()
+    }
+    @ObservationIgnored private var goIndex = 0
+
+    /// Best measured live-view configuration: 1080p30 movie mode (30 fps LV) at XGA size.
+    func prepareBest() async {
+        guard let session else { return }
+        let movie = PTPPropertyCode(0xD0A0)
+        if originalMovieMode == nil { originalMovieMode = try? await session.transport.propertyValue(movie, type: .uint64) }
+        do {
+            try await session.transport.setPropertyValue(movie, .unsigned(0x0780_0438_001E_0000), type: .uint64)
+            try await session.transport.setPropertyValue(.nikonLiveViewImageSize, .unsigned(3), type: .uint8)
+            log("Prepared: movie 1920x1080p30, live view XGA (original movie mode \(originalMovieMode.map(Self.movieModeLabel) ?? "?"))")
+        } catch {
+            log("Prepare failed: \(error)")
+        }
+        try? await Task.sleep(for: .seconds(2))
+    }
+
+    func restoreSettings() async {
+        guard let session, let originalMovieMode else { return }
+        do {
+            try await session.transport.setPropertyValue(PTPPropertyCode(0xD0A0), originalMovieMode, type: .uint64)
+            log("Restored movie mode \(Self.movieModeLabel(originalMovieMode))")
+            self.originalMovieMode = nil
+        } catch {
+            log("Restore failed: \(error)")
+        }
+    }
+
+    /// Pauses the auto run until `<out>/go<n>` exists (lets the operator re-aim the camera).
+    func waitForGo() async {
+        goIndex += 1
+        let marker = outDir.appending(path: "go\(goIndex)")
+        activity = "Waiting for go\(goIndex)…"
+        log("Waiting for \(marker.lastPathComponent)")
+        while !FileManager.default.fileExists(atPath: marker.path) { try? await Task.sleep(for: .milliseconds(250)) }
+        activity = nil
+        if session?.isLiveViewRunning == true { session?.stats.reset() }
+    }
+
+    /// One GetLiveViewImageEx (0x9428) call, compared with GetLiveViewImage.
+    func exProbe() async {
+        guard let session else { return }
+        if !session.isLiveViewRunning { startLiveView() }
+        _ = await waitForFrames()
+        do {
+            let t = try await session.transport.transact(.nikonGetLiveViewImageEx, params: [], dataOut: nil)
+            let frame = NikonLiveViewFrame(payload: t.data)
+            let dims = frame?.jpegDimensions
+            let line = "GetLiveViewImageEx: \(t.response.code), \(t.data.count) bytes, JPEG at \(frame?.jpegOffset ?? -1), \(dims.map { "\($0.width)x\($0.height)" } ?? "no JPEG"), RTT \(String(format: "%.1f", t.roundTrip * 1000)) ms"
+            log(line)
+            summary.append("- " + line)
+            try? t.data.write(to: outDir.appending(path: "samples/ex_1.bin"))
+        } catch {
+            log("GetLiveViewImageEx failed: \(error)")
+        }
+    }
+
     func soak() async {
         guard let session else { return }
         activity = "Soak test…"
@@ -383,8 +639,9 @@ final class SpikeModel {
         guard await waitForFrames() else { return log("Latency: no frames") }
         try? await Task.sleep(for: .seconds(1))
         guard let result = await latencyTest.run(target: latencyTarget, trials: options.latencyTrials, log: { log($0) }) else { return }
-        ReportWriter.write(result, to: outDir.appending(path: "latency.json"))
-        let line = String(format: "Latency (glass-to-host, %d trials, %d timeouts): median %.0f ms, min %.0f, p90 %.0f, max %.0f; +decode median %.0f ms",
+        latencyRuns += 1
+        ReportWriter.write(result, to: outDir.appending(path: "latency-\(latencyRuns).json"))
+        let line = latencyContext + String(format: "Latency (glass-to-host, %d trials, %d timeouts): median %.0f ms, min %.0f, p90 %.0f, max %.0f; +decode median %.0f ms",
                           result.trials.count, result.timeouts, result.medianMs, result.minMs, result.p90Ms,
                           result.maxMs, result.medianDecodedMs)
         log(line)
@@ -425,6 +682,20 @@ final class SpikeModel {
             case "setting": await settingTest()
             case "decode": decodeBenchmark()
             case "soak": await soak()
+            case "movie": await movieSweep()
+            case "compression": await compressionSweep()
+            case "ex": await exProbe()
+            case "prepare": await prepareBest()
+            case "restore": await restoreSettings()
+            case "target":
+                latencyWindowRequested = true
+                try? await Task.sleep(for: .milliseconds(800))
+                _ = await latencyTarget.show(white: true)
+            case "waitgo": await waitForGo()
+            case "expsim": await exposurePreviewTest()
+            case "focus": await focusTest()
+            case "afsweep": await afAreaSweep()
+            case let step where step.hasPrefix("set="): await setStep(String(step.dropFirst(4)))
             case "latency": await latency()
             case "stop": await stopLiveView()
             default: log("Unknown step \(step)")
@@ -438,6 +709,13 @@ final class SpikeModel {
             NSApp.terminate(nil)
         }
     }
+}
+
+nonisolated final class LatestFrame: @unchecked Sendable {
+    private let lock = NSLock()
+    private var frame: LiveFrame?
+    func set(_ f: LiveFrame) { lock.withLock { frame = f } }
+    func get() -> LiveFrame? { lock.withLock { frame } }
 }
 
 nonisolated private final class Counter: @unchecked Sendable {
