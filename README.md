@@ -16,6 +16,9 @@ are needed.
 - **Camera control in the app:** ISO, shutter, aperture, exposure compensation, white balance (presets and Kelvin),
   Picture Control, autofocus mode and area, click-to-focus, manual focus nudging. Only controls the camera reports
   are shown.
+- **Picture:** live-view JPEG at the camera's highest quality, optional MetalFX-upscaled 1080p with
+  contrast-adaptive sharpening, white balance and Picture Control applied in the camera.
+- **Focus:** autofocus (⌘F) and click-to-focus on the viewfinder, with the camera's AF box shown.
 - **Output:** Syphon → OBS (default); optional virtual camera later.
 - **Viewfinder:** large Metal preview with toggleable grid, center cross, histogram, focus peaking, zebras and
   safe-area guides, plus a status bar (fps, latency, resolution, battery, connection).
@@ -38,7 +41,9 @@ xcodebuild -project Reflex.xcodeproj -scheme Reflex -derivedDataPath build build
 open build/Build/Products/Debug/Reflex.app
 ```
 
-Shortcuts: ⌘L live view on/off, ⌥⌘S show/hide controls, ⇧⌘L measure latency.
+Shortcuts: ⌘L live view on/off, ⌘F autofocus, ⇧⌘S save frame, ⌥⌘S show/hide controls, ⇧⌘L measure latency.
+Click the picture to focus there. **Quick setup** (Exposure section) sets f/2.8, a flicker-free shutter speed,
+Auto ISO, and focuses.
 
 Camera setup:
 
@@ -94,7 +99,8 @@ Details and step-by-step instructions: [docs/signing.md](docs/signing.md).
 
 1. ✅ **Feasibility spike**: PTP layer, live view, measurements ([findings](docs/step0-findings.md)).
 2. 🧪 **Viewfinder and live view**: Metal pipeline, VideoToolbox decode, status bar, latency test.
-3. **Camera controls**: exposure (done early) · white balance, Picture Control, focus, click-to-focus.
+3. **Camera controls**: exposure, white balance, Picture Control, autofocus, click-to-focus (done early) · AF mode
+   and area, manual focus nudging, disconnect polish.
 4. **OBS output**: Syphon server (NDI only if a network use case comes up).
 5. **Polish**: presets ("Desk Stream", "Low Light", "IRL"), overlays, keyboard shortcuts, menu bar toggle.
 6. **Capture-card source**: UVC/HDMI input behind the same `VideoSource` protocol, camera control kept on USB.

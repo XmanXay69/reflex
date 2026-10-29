@@ -64,16 +64,18 @@ import UniformTypeIdentifiers
         return data as Data
     }
 
-    @Test func decodesConvertsAndCrops() throws {
+    private func run(scale: OutputScale, sharpness: Float) throws -> ProcessedFrame {
         let pipeline = try VideoPipeline(metal: MetalContext())
+        pipeline.setEnhancement(scale: scale, sharpness: sharpness)
         let sink = CaptureSink()
         pipeline.add(sink)
         pipeline.submit(CompressedFrame(jpeg: try Self.testJPEG(), width: 1024, height: 680, sequence: 1,
                                         requestedAt: 0, arrivedAt: 0))
         #expect(sink.done.wait(timeout: .now() + 5) == .success)
-        let frame = try #require(sink.frame)
-        #expect(frame.width == 1024 && frame.height == 576)
+        return try #require(sink.frame)
+    }
 
+    private func expectRedOverBlue(_ frame: ProcessedFrame) throws {
         let buffer = frame.pixelBuffer
         CVPixelBufferLockBaseAddress(buffer, .readOnly)
         defer { CVPixelBufferUnlockBaseAddress(buffer, .readOnly) }
@@ -83,8 +85,28 @@ import UniformTypeIdentifiers
             let p = base + y * stride + x * 4
             return (Int(p[0]), Int(p[1]), Int(p[2]))
         }
-        let top = bgra(512, 100), bottom = bgra(512, 476)
+        let top = bgra(frame.width / 2, frame.height / 6), bottom = bgra(frame.width / 2, frame.height * 5 / 6)
         #expect(top.r > 220 && top.g < 40 && top.b < 40, "top should be red, got \(top)")
         #expect(bottom.b > 220 && bottom.r < 40 && bottom.g < 40, "bottom should be blue, got \(bottom)")
+    }
+
+    @Test func decodesConvertsAndCrops() throws {
+        let frame = try run(scale: .native, sharpness: 0)
+        #expect(frame.width == 1024 && frame.height == 576)
+        try expectRedOverBlue(frame)
+    }
+
+    @Test func sharpensAtNativeSize() throws {
+        let frame = try run(scale: .native, sharpness: 0.6)
+        #expect(frame.width == 1024 && frame.height == 576)
+        try expectRedOverBlue(frame)
+    }
+
+    @Test func upscalesTo1080WithMetalFX() throws {
+        let pipeline = try VideoPipeline(metal: MetalContext())
+        try #require(pipeline.upscalerAvailable, "MetalFX spatial upscaling unsupported on this GPU")
+        let frame = try run(scale: .hd1080, sharpness: 0.5)
+        #expect(frame.width == 1920 && frame.height == 1080)
+        try expectRedOverBlue(frame)
     }
 }

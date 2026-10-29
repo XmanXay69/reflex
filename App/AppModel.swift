@@ -5,6 +5,8 @@ import ReflexCamera
 import ReflexPTP
 import ReflexVideo
 import SwiftUI
+import UniformTypeIdentifiers
+import VideoToolbox
 
 enum OutputAspect: String, CaseIterable, Identifiable {
     case wide, classic
@@ -39,6 +41,7 @@ struct LiveStats: Equatable {
     var repeatRate = 0.0
     var megabytesPerSecond = 0.0
     var roundTripMs = 0.0
+    var gpuMs = 0.0
 }
 
 @Observable
@@ -57,6 +60,10 @@ final class AppModel {
     var receivingFrames = false
     var setupError: String?
     var controls: [ControlState] = []
+    var isFocusing = false
+    var focusMessage: String?
+    /// Show the AF box until this time (after a focus action).
+    var showAFFrameUntil = Date.distantPast
 
     var aspect: OutputAspect {
         didSet {
@@ -70,6 +77,19 @@ final class AppModel {
             camera?.setQuality(quality)
         }
     }
+    var outputScale: OutputScale {
+        didSet {
+            defaults.set(outputScale.rawValue, forKey: "outputScale")
+            applyEnhancement()
+        }
+    }
+    var sharpness: Float {
+        didSet {
+            defaults.set(sharpness, forKey: "sharpness")
+            applyEnhancement()
+        }
+    }
+    var upscalerAvailable: Bool { pipeline?.upscalerAvailable ?? false }
     var liveViewEnabled = true {
         didSet { camera?.setLiveViewEnabled(liveViewEnabled) }
     }
@@ -96,6 +116,13 @@ final class AppModel {
     @ObservationIgnored private var camera: NikonCamera?
     @ObservationIgnored private var statsTimer: Timer?
     /// `--diagnostics=<file>` appends one JSON line of stats per tick (for testing without the UI).
+    /// `--snapshot-dir=<dir>` saves an output frame every 5 s (for comparing settings during development).
+    @ObservationIgnored private let snapshotDirectory: URL? = ProcessInfo.processInfo.arguments
+        .first { $0.hasPrefix("--snapshot-dir=") }
+        .map { URL(filePath: String($0.dropFirst("--snapshot-dir=".count))) }
+    @ObservationIgnored private var lastSnapshot = 0.0
+    /// `--quick-setup` runs Quick setup once live view is up (for testing without clicking).
+    @ObservationIgnored private var pendingQuickSetup = ProcessInfo.processInfo.arguments.contains("--quick-setup")
     @ObservationIgnored private let diagnosticsURL: URL? = ProcessInfo.processInfo.arguments
         .first { $0.hasPrefix("--diagnostics=") }
         .map { URL(filePath: String($0.dropFirst("--diagnostics=".count))) }
@@ -105,6 +132,15 @@ final class AppModel {
         quality = LiveViewQuality(rawValue: defaults.string(forKey: "quality") ?? "") ?? .high
         showPanel = defaults.object(forKey: "showPanel") as? Bool ?? true
         exposurePreview = defaults.object(forKey: "exposurePreview") as? Bool ?? true
+        outputScale = OutputScale(rawValue: defaults.string(forKey: "outputScale") ?? "") ?? .hd1080
+        sharpness = defaults.object(forKey: "sharpness") as? Float ?? 0.35
+        // Settings v2: picture-quality defaults (Max JPEG, 1080p enhanced, moderate sharpening) replace v1's.
+        if defaults.integer(forKey: "settingsVersion") < 2 {
+            quality = .max
+            outputScale = .hd1080
+            sharpness = 0.35
+            defaults.set(2, forKey: "settingsVersion")
+        }
         appearance = Appearance(rawValue: defaults.string(forKey: "appearance") ?? "") ?? .dark
 
         var pipeline: VideoPipeline?
@@ -125,6 +161,7 @@ final class AppModel {
         self.viewfinder = viewfinder
         latency = LatencyTestController(pipeline: pipeline)
         pipeline?.setAspect(aspect.ratio)
+        applyEnhancement()
         start()
     }
 
@@ -224,9 +261,17 @@ final class AppModel {
                           requestRate: usb?.requestRate ?? 0,
                           repeatRate: usb.map { Double($0.repeats) / $0.seconds } ?? 0,
                           megabytesPerSecond: usb?.megabytesPerSecond ?? 0,
-                          roundTripMs: (usb?.meanRoundTrip ?? 0) * 1000)
+                          roundTripMs: (usb?.meanRoundTrip ?? 0) * 1000, gpuMs: video.meanGPU * 1000)
         if !receivingFrames { stats.width = pipeline.latestFrame?.width ?? 0; stats.height = pipeline.latestFrame?.height ?? 0 }
         if let diagnosticsURL { writeDiagnostics(video: video, to: diagnosticsURL) }
+        if pendingQuickSetup, receivingFrames, !controls.isEmpty {
+            pendingQuickSetup = false
+            quickSetup()
+        }
+        if let snapshotDirectory, receivingFrames, hostTime() - lastSnapshot > 5 {
+            lastSnapshot = hostTime()
+            saveFrame(to: snapshotDirectory)
+        }
     }
 
     private func writeDiagnostics(video: PipelineCounters, to url: URL) {
@@ -235,10 +280,10 @@ final class AppModel {
             "t": hostTime(), "phase": "\(phase)", "mode": status.liveViewMode?.rawValue ?? "", "problem": status.problem ?? "",
             "battery": status.batteryPercent ?? -1, "fps": stats.fps, "size": "\(stats.width)x\(stats.height)",
             "usbToScreenMedianMs": stats.usbToScreenMs ?? -1, "usbToScreenP95Ms": usb.isEmpty ? -1 : usb[Int(Double(usb.count - 1) * 0.95)] * 1000,
-            "decodeMs": stats.decodeMs, "requestRate": stats.requestRate, "repeatRate": stats.repeatRate,
+            "decodeMs": stats.decodeMs, "gpuMs": stats.gpuMs, "scale": outputScale.rawValue, "sharpness": sharpness, "requestRate": stats.requestRate, "repeatRate": stats.repeatRate,
             "MBps": stats.megabytesPerSecond, "rttMs": stats.roundTripMs,
             "lowPower": ProcessInfo.processInfo.isLowPowerModeEnabled, "thermal": ProcessInfo.processInfo.thermalState.rawValue, "dropped": video.dropped, "quality": quality.rawValue,
-            "glassToGlassMs": latency.lastResult?.medianMs ?? -1, "exposurePreview": exposurePreview,
+            "glassToGlassMs": latency.lastResult?.medianMs ?? -1, "exposurePreview": exposurePreview, "focusing": isFocusing, "focusMessage": focusMessage ?? "",
             "controls": controls.map { "\($0.control.rawValue)=\($0.label)\($0.isWritable ? "" : " (ro)") [\($0.options.count)]" },
         ]
         Self.appendLine(line, to: url)
@@ -256,9 +301,106 @@ final class AppModel {
         }
     }
 
+    /// Saves the current output frame as a PNG. Returns the file, or nil if there's no frame yet.
+    @discardableResult
+    func saveFrame(to directory: URL? = nil) -> URL? {
+        guard let frame = pipeline?.latestFrame else { return nil }
+        var image: CGImage?
+        VTCreateCGImageFromCVPixelBuffer(frame.pixelBuffer, options: nil, imageOut: &image)
+        guard let image else { return nil }
+        let folder = directory ?? FileManager.default.urls(for: .picturesDirectory, in: .userDomainMask)[0].appending(path: "Reflex")
+        try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        let stamp = Date().formatted(.iso8601.year().month().day().time(includingFractionalSeconds: false))
+            .replacingOccurrences(of: ":", with: "-")
+        let url = folder.appending(path: "Reflex \(stamp) \(frame.width)x\(frame.height).png")
+        guard let dest = CGImageDestinationCreateWithURL(url as CFURL, UTType.png.identifier as CFString, 1, nil) else { return nil }
+        CGImageDestinationAddImage(dest, image, nil)
+        return CGImageDestinationFinalize(dest) ? url : nil
+    }
+
+    // MARK: Focus
+
+    /// Live-view JPEG → output-frame mapping for the current aspect crop.
+    private func outputCrop() -> (jpeg: CGSize, crop: CropRect)? {
+        guard let size = camera?.liveViewSize, size.width > 0 else { return nil }
+        return (size, CropRect.centered(sourceWidth: Int(size.width), sourceHeight: Int(size.height), aspect: aspect.ratio))
+    }
+
+    /// Focus at a point in the output frame (0…1, top-left origin), or at the current AF area when nil.
+    func autofocus(atOutput point: CGPoint? = nil) {
+        guard let camera, !isFocusing else { return }
+        var target: CGPoint?
+        if let point, let (jpeg, crop) = outputCrop() {
+            target = CGPoint(x: (Double(crop.x) + point.x * Double(crop.width)) / jpeg.width,
+                             y: (Double(crop.y) + point.y * Double(crop.height)) / jpeg.height)
+        }
+        isFocusing = true
+        focusMessage = nil
+        showAFFrameUntil = .distantFuture
+        Task {
+            do {
+                if try await camera.autofocus(at: target) == .couldNotLock {
+                    focusMessage = "Couldn't lock focus there. Click something with more detail, or add light."
+                }
+            } catch {
+                focusMessage = "\(error)"
+            }
+            isFocusing = false
+            showAFFrameUntil = Date().addingTimeInterval(1.5)
+        }
+    }
+
+    /// The AF area in output-frame coordinates (0…1), if it's inside the visible crop.
+    var afFrameInOutput: CGRect? {
+        guard let af = status.afFrame, let (jpeg, crop) = outputCrop() else { return nil }
+        let rect = CGRect(x: (af.minX * jpeg.width - Double(crop.x)) / Double(crop.width),
+                          y: (af.minY * jpeg.height - Double(crop.y)) / Double(crop.height),
+                          width: af.width * jpeg.width / Double(crop.width),
+                          height: af.height * jpeg.height / Double(crop.height))
+        return rect.intersects(CGRect(x: 0, y: 0, width: 1, height: 1)) ? rect : nil
+    }
+
+    // MARK: Quick setup
+
+    /// A good starting point for streaming indoors: f/2.8 (or the lens's widest if it can't open that far),
+    /// 1/60 s (1/50 in 50 Hz countries, so lights don't flicker), Auto ISO, no compensation, then autofocus.
+    func quickSetup() {
+        guard let camera else { return }
+        let controls = controls
+        func state(_ c: CameraControl) -> ControlState? { controls.first { $0.control == c && $0.isWritable } }
+        Task {
+            if let aperture = state(.aperture),
+               let best = aperture.options.min(by: { abs(log(Double($0.int ?? 1) / 280)) < abs(log(Double($1.int ?? 1) / 280)) }) {
+                try? await camera.set(.aperture, to: best)
+            }
+            if let shutter = state(.shutter) {
+                let target = 1 / Self.mainsFrequency
+                let seconds: (PTPValue) -> Double = { value in
+                    let v = Double(value.int ?? 0)
+                    return shutter.mode == .photo ? v / 10_000 : Double((value.int ?? 0) >> 16) / Double(max((value.int ?? 1) & 0xFFFF, 1))
+                }
+                if let best = shutter.options.filter({ seconds($0) > 0 }).min(by: { abs(log(seconds($0) / target)) < abs(log(seconds($1) / target)) }) {
+                    try? await camera.set(.shutter, to: best)
+                }
+            }
+            if state(.autoISO) != nil { try? await camera.set(.autoISO, to: .unsigned(1)) }
+            if state(.compensation) != nil { try? await camera.set(.compensation, to: .signed(0)) }
+            autofocus()
+        }
+    }
+
+    /// Mains frequency for flicker-free shutter speeds.
+    static var mainsFrequency: Double {
+        let sixtyHertz: Set<String> = ["US", "CA", "MX", "BR", "CO", "VE", "PE", "EC", "KR", "TW", "PH", "SA", "PR", "CR",
+                                       "GT", "HN", "NI", "PA", "SV", "DO", "BS", "JM", "TT", "CU", "LR"]
+        return sixtyHertz.contains(Locale.current.region?.identifier ?? "") ? 60 : 50
+    }
+
+    private func applyEnhancement() { pipeline?.setEnhancement(scale: outputScale, sharpness: sharpness) }
+
     func toggleLiveView() { liveViewEnabled.toggle() }
 
-    func setControl(_ control: ExposureControl, to value: PTPValue) {
+    func setControl(_ control: CameraControl, to value: PTPValue) {
         guard let camera else { return }
         Task { try? await camera.set(control, to: value) }
     }

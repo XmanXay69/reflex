@@ -234,3 +234,28 @@ that first command, retries once, and shows a Try Again button instead of failin
 ISO (0x500F, 31 values), Auto ISO (0xD054) and exposure compensation (0x5010) all apply during live view without
 interrupting it, and the image follows them with exposure preview on. 0x500D is in whole 1/10 000 s, so 1/160 s
 arrives as 62; the app snaps labels to the standard 1/3-stop speeds.
+
+**Picture Control changes live view; Active D-Lighting doesn't.** Frames captured at each setting in photo live
+view (quality 5, exposure preview on), measured on a 256 × 170 downsample:
+
+| Picture Control (0xD200) | Mean saturation | Shadows (p10 luma) |
+|---|---|---|
+| 1 Standard | 0.256 | 0.033 |
+| 2 Neutral | 0.224 | 0.046 |
+| 3 Vivid | 0.394 | 0.020 |
+| 4 Monochrome | 0.000 | 0.020 |
+| 5 Portrait | 0.243 | 0.041 |
+| 6 Landscape | 0.341 | 0.022 |
+| 7 Flat | 0.149 | 0.086 |
+| 8 Auto | 0.195 | 0.042 |
+
+This confirms Nikon's numbering (1–8 = Standard, Neutral, Vivid, Monochrome, Portrait, Landscape, Flat, Auto).
+Active D-Lighting (0xD14E, values 0/2/3/4/5/65535) left brightness, shadows and contrast unchanged within noise
+(mean luma 0.164–0.174), so it only affects saved photos and isn't offered in the app.
+
+**Autofocus results.** After `AfDrive`, `DeviceReady` answers OK when focus locks and `OutOfFocus` (0xA002) when the
+lens moved but found nothing to lock onto (dim, low-contrast area); neither is an error. Typical time ~0.2–0.6 s.
+
+**Enhanced 1080p output costs ~2 ms of GPU time per frame** on an M5 (Y'CbCr → RGB, MetalFX spatial upscale
+1024 × 576 → 1920 × 1080, contrast-adaptive sharpening, viewfinder draw), at an unchanged 30 fps and
+~26 ms USB-to-screen time.

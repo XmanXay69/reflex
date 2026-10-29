@@ -54,6 +54,8 @@ public final class VideoPipeline: @unchecked Sendable {
     private var pending: CompressedFrame?
     private var draining = false
     private var aspect: Double? = 16.0 / 9.0
+    private var scale: OutputScale = .native
+    private var sharpness: Float = 0
     private var sinks: [ObjectIdentifier: FrameSink] = [:]
     private var counters = PipelineCounters()
     private var latest: ProcessedFrame?
@@ -65,6 +67,17 @@ public final class VideoPipeline: @unchecked Sendable {
 
     /// Output aspect ratio (width / height); nil keeps the camera's own framing.
     public func setAspect(_ aspect: Double?) { lock.withLock { self.aspect = aspect } }
+
+    /// Output size (native or MetalFX-upscaled 1080p) and sharpening strength (0…1).
+    public func setEnhancement(scale: OutputScale, sharpness: Float) {
+        lock.withLock {
+            self.scale = scale
+            self.sharpness = sharpness
+        }
+    }
+
+    /// Whether this GPU supports the MetalFX upscaler used for `.hd1080`.
+    public var upscalerAvailable: Bool { converter.upscalerAvailable }
 
     public func add(_ sink: FrameSink) { lock.withLock { sinks[ObjectIdentifier(sink)] = sink } }
     public func remove(_ sink: FrameSink) { lock.withLock { _ = sinks.removeValue(forKey: ObjectIdentifier(sink)) } }
@@ -99,17 +112,23 @@ public final class VideoPipeline: @unchecked Sendable {
 
     private func drain() {
         while true {
-            let next = lock.withLock { () -> (CompressedFrame, Double?, [FrameSink])? in
+            let next = lock.withLock { () -> (CompressedFrame, Settings, [FrameSink])? in
                 guard let frame = pending else { draining = false; return nil }
                 pending = nil
-                return (frame, aspect, Array(sinks.values))
+                return (frame, Settings(aspect: aspect, scale: scale, sharpness: sharpness), Array(sinks.values))
             }
-            guard let (frame, aspect, sinks) = next else { return }
-            autoreleasepool { process(frame, aspect: aspect, sinks: sinks) }
+            guard let (frame, settings, sinks) = next else { return }
+            autoreleasepool { process(frame, settings: settings, sinks: sinks) }
         }
     }
 
-    private func process(_ frame: CompressedFrame, aspect: Double?, sinks: [FrameSink]) {
+    private struct Settings {
+        var aspect: Double?
+        var scale: OutputScale
+        var sharpness: Float
+    }
+
+    private func process(_ frame: CompressedFrame, settings: Settings, sinks: [FrameSink]) {
         let started = hostTime()
         let decoded: CVPixelBuffer
         do {
@@ -120,9 +139,10 @@ public final class VideoPipeline: @unchecked Sendable {
         }
         let decodedAt = hostTime()
         let crop = CropRect.centered(sourceWidth: CVPixelBufferGetWidth(decoded),
-                                     sourceHeight: CVPixelBufferGetHeight(decoded), aspect: aspect)
+                                     sourceHeight: CVPixelBufferGetHeight(decoded), aspect: settings.aspect)
         guard let commandBuffer = metal.queue.makeCommandBuffer(),
-              let output = converter.encode(decoded, crop: crop, into: commandBuffer),
+              let output = converter.encode(decoded, crop: crop, scale: settings.scale, sharpness: settings.sharpness,
+                                            into: commandBuffer),
               let texture = CVMetalTextureGetTexture(output.texture) else { return }
         let processed = ProcessedFrame(pixelBuffer: output.pixelBuffer, texture: texture, cvTexture: output.texture,
                                        sequence: frame.sequence, requestedAt: frame.requestedAt,
@@ -130,7 +150,11 @@ public final class VideoPipeline: @unchecked Sendable {
         for sink in sinks { sink.publish(processed, commandBuffer: commandBuffer) }
         // Keep the decoded frame and texture wrappers alive until the GPU is done with them.
         let keepAlive = KeepAlive(output.retained + [decoded])
-        commandBuffer.addCompletedHandler { _ in keepAlive.release() }
+        commandBuffer.addCompletedHandler { [weak self] buffer in
+            keepAlive.release()
+            let gpu = buffer.gpuEndTime - buffer.gpuStartTime
+            if gpu > 0 { self?.lock.withLock { self?.counters.gpuTotal += gpu; self?.counters.gpuFrames += 1 } }
+        }
         commandBuffer.commit()
         lock.withLock {
             latest = processed
@@ -154,6 +178,8 @@ public struct PipelineCounters: Sendable {
     public var dropped = 0
     public var decodeErrors = 0
     public var decodeTotal = 0.0
+    public var gpuTotal = 0.0
+    public var gpuFrames = 0
     public var usbToScreen: [Double] = []
     public var lastSize = (width: 0, height: 0)
     public var since = hostTime()
@@ -161,6 +187,8 @@ public struct PipelineCounters: Sendable {
     public var seconds: Double { max(hostTime() - since, 0.001) }
     public var presentedFPS: Double { Double(presented) / seconds }
     public var meanDecode: Double { processed == 0 ? 0 : decodeTotal / Double(processed) }
+    /// GPU time per frame (convert, upscale, sharpen, viewfinder draw).
+    public var meanGPU: Double { gpuFrames == 0 ? 0 : gpuTotal / Double(gpuFrames) }
     public var medianUSBToScreen: Double? {
         guard !usbToScreen.isEmpty else { return nil }
         return usbToScreen.sorted()[usbToScreen.count / 2]

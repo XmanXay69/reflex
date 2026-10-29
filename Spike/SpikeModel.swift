@@ -302,6 +302,7 @@ final class SpikeModel {
         let transport = session.transport
         guard let desc = try? await transport.propertyDescriptor(property) else { return log("\(name): \(property) unsupported") }
         _ = try? await transport.setPropertyValue(.nikonLiveViewImageSize, .unsigned(3), type: .uint8)
+        log("\(name): original \(property) = \(desc.current)")
 
         var rows: [BenchmarkReport.Row] = []
         for value in values {
@@ -759,6 +760,12 @@ final class SpikeModel {
             case "focus": await focusTest()
             case "afsweep": await afAreaSweep()
             case "csize": await compressedSizeProbe()
+            case "pcsweep":
+                await sweep("picturecontrol", property: .nikonActivePicCtrlItem, values: [1, 2, 3, 4, 7, 8, 5, 6].map { .unsigned($0) },
+                            label: { "pc\($0)" }, settle: 1.2)
+            case "adlsweep":
+                await sweep("adl", property: .nikonActiveDLighting, values: [0, 2, 3, 4, 5, 65535].map { .unsigned($0) },
+                            label: { "adl\($0)" }, settle: 1.2)
             case let step where step.hasPrefix("set="): await setStep(String(step.dropFirst(4)))
             case let step where step.hasPrefix("setq="): await setStep(String(step.dropFirst(5)), settle: 0)
             case let step where step.hasPrefix("timeline="):

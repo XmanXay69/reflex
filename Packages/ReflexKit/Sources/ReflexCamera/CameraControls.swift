@@ -1,12 +1,22 @@
 import Foundation
 import ReflexPTP
 
-/// The exposure controls Reflex exposes. Each maps to a different camera property in photo and movie live view:
-/// the D780 keeps separate settings for movies.
-public enum ExposureControl: String, CaseIterable, Sendable, Identifiable {
+/// The camera controls Reflex exposes. Each maps to a different camera property in photo and movie live view:
+/// the D780 keeps separate settings for movies. Every one listed here was verified to change the live-view image
+/// (Active D-Lighting was tested and doesn't, so it isn't here).
+public enum CameraControl: String, CaseIterable, Sendable, Identifiable {
     case mode, shutter, aperture, iso, autoISO, compensation
+    case whiteBalance, colorTemperature, pictureControl
+
+    public enum Group: Sendable { case exposure, color }
 
     public var id: String { rawValue }
+    public var group: Group {
+        switch self {
+        case .whiteBalance, .colorTemperature, .pictureControl: .color
+        default: .exposure
+        }
+    }
 
     public var title: String {
         switch self {
@@ -16,6 +26,9 @@ public enum ExposureControl: String, CaseIterable, Sendable, Identifiable {
         case .iso: "ISO"
         case .autoISO: "Auto ISO"
         case .compensation: "Exposure comp."
+        case .whiteBalance: "White balance"
+        case .colorTemperature: "Color temperature"
+        case .pictureControl: "Picture Control"
         }
     }
 
@@ -33,13 +46,35 @@ public enum ExposureControl: String, CaseIterable, Sendable, Identifiable {
         case (.autoISO, .movie): (.nikonMovieISOAutoControl, .uint8)
         case (.compensation, .photo): (.exposureBiasCompensation, .int16)
         case (.compensation, .movie): (.nikonMovieExposureBiasCompensation, .int16)
+        case (.whiteBalance, .photo): (.whiteBalance, .uint16)
+        case (.whiteBalance, .movie): (.nikonMovieWhiteBalance, .uint16)
+        case (.colorTemperature, .photo): (.nikonWhiteBalanceColorTemperature, .uint16)
+        case (.colorTemperature, .movie): (.nikonMovieWbColorTemp, .uint16)
+        case (.pictureControl, .photo): (.nikonActivePicCtrlItem, .uint16)
+        case (.pictureControl, .movie): (.nikonMovieActivePicCtrlItem, .uint16)
         }
     }
+
+    /// Trims what the camera offers to what's useful in a panel: Kelvin in 100 K steps; Picture Controls whose
+    /// names were verified on a D780 (the Creative and custom slots are left out until verified).
+    func usableOptions(_ options: [PTPValue], current: PTPValue) -> [PTPValue] {
+        switch self {
+        case .colorTemperature:
+            return options.filter { ($0.int ?? 0) % 100 == 0 || $0 == current }
+        case .pictureControl:
+            return options.filter { (1...8).contains($0.int ?? 0) || $0.int == 100 || $0 == current }
+        default:
+            return options
+        }
+    }
+
+    /// White-balance value meaning "use the Kelvin setting".
+    public static let colorTemperatureWhiteBalance = PTPValue.unsigned(0x8012)
 }
 
 /// What the camera currently allows for one control.
 public struct ControlState: Sendable, Equatable, Identifiable {
-    public var control: ExposureControl
+    public var control: CameraControl
     public var mode: LiveViewMode
     public var code: PTPPropertyCode
     public var type: PTPDataType
@@ -48,7 +83,7 @@ public struct ControlState: Sendable, Equatable, Identifiable {
     public var options: [PTPValue]
     public var isWritable: Bool
 
-    public var id: ExposureControl { control }
+    public var id: CameraControl { control }
     public var index: Int? { options.firstIndex(of: value) }
     public var label: String { label(for: value) }
 
@@ -58,7 +93,7 @@ public struct ControlState: Sendable, Equatable, Identifiable {
 }
 
 enum ControlFormatter {
-    static func label(_ control: ExposureControl, mode: LiveViewMode, value: PTPValue) -> String {
+    static func label(_ control: CameraControl, mode: LiveViewMode, value: PTPValue) -> String {
         guard let v = value.int else { return value.description }
         switch control {
         case .mode:
@@ -75,6 +110,19 @@ enum ControlFormatter {
         case .compensation:
             if v == 0 { return "0 EV" }
             return String(format: "%+.1f EV", Double(v) / 1000)
+        case .whiteBalance:
+            // Standard PTP codes plus Nikon's vendor range; 0x8015 is "same as photo" in the movie menu.
+            let names: [Int: String] = [2: "Auto", 4: "Sunny", 5: "Fluorescent", 6: "Incandescent", 7: "Flash",
+                                        0x8010: "Cloudy", 0x8011: "Shade", 0x8012: "Kelvin", 0x8013: "Preset",
+                                        0x8015: "Same as photo", 0x8016: "Natural light auto"]
+            return names[v] ?? String(format: "0x%04X", v)
+        case .colorTemperature:
+            return "\(v) K"
+        case .pictureControl:
+            // Order verified on a D780 by measuring saturation (Vivid highest, Monochrome zero, Flat lowest contrast).
+            let names: [Int: String] = [1: "Standard", 2: "Neutral", 3: "Vivid", 4: "Monochrome", 5: "Portrait",
+                                        6: "Landscape", 7: "Flat", 8: "Auto", 100: "Same as photo"]
+            return names[v] ?? (v >= 201 ? "Custom \(v - 200)" : v >= 101 ? "Creative \(v - 100)" : "\(v)")
         }
     }
 
@@ -116,4 +164,6 @@ enum ControlFormatter {
 
 extension PTPPropertyCode {
     static let nikonMovieISOAutoControl = PTPPropertyCode(0xD0AD)
+    static let nikonMovieWbColorTemp = PTPPropertyCode(0xD21A)
+    static let nikonMovieActivePicCtrlItem = PTPPropertyCode(0xD237)
 }

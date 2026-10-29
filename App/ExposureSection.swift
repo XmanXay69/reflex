@@ -9,12 +9,20 @@ struct ExposureSection: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
-            SectionHeader(title: "Exposure")
+            HStack {
+                SectionHeader(title: "Exposure")
+                Spacer()
+                if !model.controls.isEmpty {
+                    Button("Quick setup") { model.quickSetup() }
+                        .controlSize(.small)
+                        .help("f/2.8, 1/\(Int(AppModel.mainsFrequency)) s (no light flicker), Auto ISO, then autofocus.")
+                }
+            }
             if model.controls.isEmpty {
                 Text(model.phase == .connected ? "Reading camera settings…" : "Connect the camera to adjust exposure.")
                     .foregroundStyle(.secondary)
             } else {
-                ForEach(model.controls) { state in
+                ForEach(model.controls.filter { $0.control.group == .exposure }) { state in
                     switch state.control {
                     case .mode:
                         LabeledContent("Mode") { Text(state.label).monospacedDigit() }
@@ -47,6 +55,65 @@ struct ExposureSection: View {
                         .fixedSize(horizontal: false, vertical: true)
                 }
             }
+        }
+    }
+}
+
+struct FocusSection: View {
+    @Bindable var model: AppModel
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            SectionHeader(title: "Focus")
+            HStack {
+                Button(model.isFocusing ? "Focusing…" : "Autofocus") { model.autofocus() }
+                    .disabled(model.isFocusing || !model.receivingFrames)
+                    .help("Autofocus (⌘F)")
+                if model.isFocusing { ProgressView().controlSize(.small) }
+            }
+            Text(model.focusMessage ?? "Or click the picture to focus on that spot.")
+                .font(.callout)
+                .foregroundStyle(model.focusMessage == nil ? .secondary : Theme.warning)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+}
+
+/// White balance and Picture Control: processed by the camera itself, so they cost no latency.
+struct ColorSection: View {
+    @Bindable var model: AppModel
+
+    private func state(_ control: CameraControl) -> ControlState? { model.controls.first { $0.control == control } }
+
+    var body: some View {
+        if state(.whiteBalance) != nil || state(.pictureControl) != nil {
+            VStack(alignment: .leading, spacing: 14) {
+                SectionHeader(title: "Color")
+                if let wb = state(.whiteBalance) {
+                    menu(wb, title: "White balance")
+                    if wb.value == CameraControl.colorTemperatureWhiteBalance, let kelvin = state(.colorTemperature) {
+                        StepSlider(state: kelvin) { model.setControl(.colorTemperature, to: $0) }
+                    }
+                }
+                if let picture = state(.pictureControl) {
+                    menu(picture, title: "Picture Control")
+                    Text("Neutral or Flat keep skin tones natural; Vivid adds punch. Applied in the camera, so it's free.")
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+        }
+    }
+
+    private func menu(_ state: ControlState, title: String) -> some View {
+        LabeledContent(title) {
+            Picker(title, selection: Binding(get: { state.value }, set: { model.setControl(state.control, to: $0) })) {
+                ForEach(state.options, id: \.self) { Text(state.label(for: $0)).tag($0) }
+            }
+            .labelsHidden()
+            .fixedSize()
+            .disabled(!state.isWritable)
         }
     }
 }

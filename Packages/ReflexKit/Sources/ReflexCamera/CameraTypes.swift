@@ -1,3 +1,4 @@
+import CoreGraphics
 import Foundation
 import ReflexPTP
 
@@ -44,8 +45,16 @@ public struct CameraStatus: Sendable, Equatable {
     public var liveViewRunning = false
     /// A problem the user can fix (mode dial, card, temperature…), or nil.
     public var problem: String?
+    /// The camera's AF area, normalized to the live-view frame (0…1, origin top-left).
+    public var afFrame: CGRect?
 
     public init() {}
+}
+
+public enum FocusResult: Sendable {
+    case locked
+    /// The lens moved but found nothing to lock onto at the AF area (dim or low-contrast spot).
+    case couldNotLock
 }
 
 /// One live-view frame straight off the wire.
@@ -61,12 +70,14 @@ public struct LiveViewFrame: Sendable {
 public enum CameraError: Error, CustomStringConvertible, Equatable {
     case notSupported(String)
     case liveViewRefused([String])
+    case focusFailed(String)
 
     public var description: String {
         switch self {
         case let .notSupported(model): "\(model) doesn't support Nikon USB live view."
         case let .liveViewRefused(reasons):
             reasons.isEmpty ? "The camera refused live view." : "Live view unavailable: " + reasons.joined(separator: ", ") + "."
+        case let .focusFailed(message): message
         }
     }
 }

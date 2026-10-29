@@ -24,8 +24,9 @@ public final class NikonCamera: @unchecked Sendable {
     /// Original values of settings Reflex changed, restored by `shutdown()`.
     private var originals: [PTPPropertyCode: (PTPValue, PTPDataType)] = [:]
     private var reconfigureNeeded = false
+    private var lastInfo: NikonLiveViewInfo?
     private var wantsExposurePreview = true
-    private var controls: [ExposureControl: ControlState] = [:]
+    private var controls: [CameraControl: ControlState] = [:]
     private var controlsHandler: (@Sendable ([ControlState]) -> Void)?
 
     public init(connection: CameraConnection, quality: LiveViewQuality, exposurePreview: Bool = true) {
@@ -37,7 +38,7 @@ public final class NikonCamera: @unchecked Sendable {
     public func onFrame(_ handler: @escaping @Sendable (LiveViewFrame) -> Void) { lock.withLock { frameHandler = handler } }
     public func onStatus(_ handler: @escaping @Sendable (CameraStatus) -> Void) { lock.withLock { statusHandler = handler } }
 
-    /// Exposure controls, in display order, whenever any of them changes.
+    /// Camera controls, in display order, whenever any of them changes.
     public func onControls(_ handler: @escaping @Sendable ([ControlState]) -> Void) { lock.withLock { controlsHandler = handler } }
 
     /// Diagnostic messages (settings applied or rejected).
@@ -100,9 +101,9 @@ public final class NikonCamera: @unchecked Sendable {
         }
     }
 
-    /// Applies a new value for an exposure control, then re-reads all controls (one change can move another's
+    /// Applies a new value for a camera control, then re-reads all controls (one change can move another's
     /// limits). Runs between live-view fetches.
-    public func set(_ control: ExposureControl, to value: PTPValue) async throws {
+    public func set(_ control: CameraControl, to value: PTPValue) async throws {
         guard let state = lock.withLock({ controls[control] }) else { return }
         do {
             try await transport.setPropertyValue(state.code, value, type: state.type)
@@ -115,14 +116,56 @@ public final class NikonCamera: @unchecked Sendable {
         await refreshControls()
     }
 
-    /// Reads every exposure control for the current live-view mode and publishes them.
+    /// Pixel size of the live-view JPEG (for mapping clicks), once frames arrive.
+    public var liveViewSize: CGSize? {
+        lock.withLock { lastInfo.map { CGSize(width: $0.jpegWidth, height: $0.jpegHeight) } }
+    }
+
+    /// Focuses at a point given in live-view JPEG coordinates (0…1), or wherever the AF area already is.
+    /// Moves the AF area (`ChangeAfArea`, in sensor coordinates), runs `AfDrive`, then polls `DeviceReady`:
+    /// OK means focus locked, `OutOfFocus` (0xA002) means the lens moved but couldn't lock there.
+    @discardableResult
+    public func autofocus(at point: CGPoint? = nil) async throws -> FocusResult {
+        if let point, let info = lock.withLock({ lastInfo }) {
+            let x = UInt32(max(0, min(1, point.x)) * Double(info.sensorWidth))
+            let y = UInt32(max(0, min(1, point.y)) * Double(info.sensorHeight))
+            let move = try await transport.transact(.nikonChangeAfArea, params: [x, y], dataOut: nil)
+            if !move.response.code.isOK { log("ChangeAfArea(\(x), \(y)) → \(move.response.code)") }
+        }
+        let started = hostTime()
+        let drive = try await transport.transact(.nikonAfDrive, params: [], dataOut: nil)
+        guard drive.response.code.isOK else {
+            log("AfDrive → \(drive.response.code)")
+            throw CameraError.focusFailed("The camera couldn't autofocus. Check the lens is set to autofocus (A or M/A).")
+        }
+        while hostTime() - started < 5 {
+            let ready = try await transport.transact(.nikonDeviceReady, params: [], dataOut: nil)
+            let elapsed = Int((hostTime() - started) * 1000)
+            switch ready.response.code {
+            case .ok:
+                log("Autofocus locked in \(elapsed) ms")
+                return .locked
+            case .nikonOutOfFocus:
+                log("Autofocus couldn't lock (\(elapsed) ms)")
+                return .couldNotLock
+            case .deviceBusy:
+                try await Task.sleep(for: .milliseconds(20))
+            default:
+                log("Autofocus: DeviceReady → \(ready.response.code)")
+                throw PTPError.response(ready.response.code, operation: .nikonDeviceReady)
+            }
+        }
+        throw PTPError.timedOut(.nikonDeviceReady)
+    }
+
+    /// Reads every camera control for the current live-view mode and publishes them.
     public func refreshControls() async {
         guard let mode = lock.withLock({ status.liveViewMode }) else { return }
-        var fresh: [ExposureControl: ControlState] = [:]
-        for control in ExposureControl.allCases {
+        var fresh: [CameraControl: ControlState] = [:]
+        for control in CameraControl.allCases {
             let (code, type) = control.property(for: mode)
             guard let desc = try? await transport.propertyDescriptor(code) else { continue }
-            let options = desc.allowedValues ?? [desc.current]
+            let options = control.usableOptions(desc.allowedValues ?? [desc.current], current: desc.current)
             fresh[control] = ControlState(control: control, mode: mode, code: code, type: desc.dataType == type ? type : desc.dataType,
                                           value: desc.current, options: options, isWritable: desc.isWritable)
         }
@@ -131,7 +174,7 @@ public final class NikonCamera: @unchecked Sendable {
             controls = fresh
             return (controlsHandler, changed)
         }
-        if changed { handler?(ExposureControl.allCases.compactMap { fresh[$0] }) }
+        if changed { handler?(CameraControl.allCases.compactMap { fresh[$0] }) }
     }
 
     /// Stops live view and restores every setting Reflex changed. Safe to call more than once.
@@ -227,6 +270,7 @@ public final class NikonCamera: @unchecked Sendable {
                     }
                     lastHash = hash
                     sequence += 1
+                    if let info = frame.info { trackAFFrame(info) }
                     let handler = lock.withLock { frameHandler }
                     handler?(LiveViewFrame(frame: frame, info: frame.info, requestedAt: t.sentAt,
                                            arrivedAt: t.completedAt, sequence: sequence))
@@ -317,6 +361,17 @@ public final class NikonCamera: @unchecked Sendable {
     private func refreshMode() async {
         guard let value = try? await transport.propertyValue(.nikonLiveViewSelector, type: .uint8) else { return }
         updateStatus { $0.liveViewMode = value.int == 1 ? .movie : .photo }
+    }
+
+    /// Publishes the AF frame (normalized to the live-view JPEG) when it moves.
+    private func trackAFFrame(_ info: NikonLiveViewInfo) {
+        lock.withLock { lastInfo = info }
+        guard info.sensorWidth > 0, info.sensorHeight > 0 else { return }
+        let w = Double(info.sensorWidth), h = Double(info.sensorHeight)
+        let rect = CGRect(x: (Double(info.afCenterX) - Double(info.afWidth) / 2) / w,
+                          y: (Double(info.afCenterY) - Double(info.afHeight) / 2) / h,
+                          width: Double(info.afWidth) / w, height: Double(info.afHeight) / h)
+        if lock.withLock({ status.afFrame }) != rect { updateStatus { $0.afFrame = rect } }
     }
 
     private func updateStatus(_ change: (inout CameraStatus) -> Void) {

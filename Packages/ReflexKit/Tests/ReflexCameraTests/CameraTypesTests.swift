@@ -57,8 +57,8 @@ import Testing
     }
 
     @Test func photoAndMovieUseDifferentProperties() {
-        #expect(ExposureControl.iso.property(for: .photo).code.rawValue == 0x500F)
-        #expect(ExposureControl.iso.property(for: .movie).code.rawValue == 0xD1AA)
-        #expect(ExposureControl.shutter.property(for: .movie).code.rawValue == 0xD1A8)
+        #expect(CameraControl.iso.property(for: .photo).code.rawValue == 0x500F)
+        #expect(CameraControl.iso.property(for: .movie).code.rawValue == 0xD1AA)
+        #expect(CameraControl.shutter.property(for: .movie).code.rawValue == 0xD1A8)
     }
 }

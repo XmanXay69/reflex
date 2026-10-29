@@ -14,6 +14,7 @@ struct ContentView: View {
                         ViewfinderView(renderer: viewfinder)
                             .accessibilityLabel("Live view")
                     }
+                    FocusLayer(model: model)
                     ViewfinderOverlay(model: model)
                 }
                 Divider()
@@ -77,6 +78,38 @@ struct ViewfinderView: NSViewRepresentable {
             renderer.layer.drawableSize = size
             renderer.redraw()
         }
+    }
+}
+
+/// Click-to-focus and the AF box, aligned with the aspect-fit picture.
+struct FocusLayer: View {
+    @Bindable var model: AppModel
+
+    var body: some View {
+        GeometryReader { geometry in
+            let imageSize = CGSize(width: max(model.stats.width, 1), height: max(model.stats.height, 1))
+            let fit = ViewfinderRenderer.fitRect(imageSize: imageSize, in: CGRect(origin: .zero, size: geometry.size))
+            ZStack(alignment: .topLeading) {
+                Color.clear
+                    .contentShape(Rectangle())
+                    .onTapGesture(coordinateSpace: .local) { location in
+                        guard model.receivingFrames, fit.contains(location) else { return }
+                        model.autofocus(atOutput: CGPoint(x: (location.x - fit.minX) / fit.width,
+                                                          y: (location.y - fit.minY) / fit.height))
+                    }
+                TimelineView(.periodic(from: .now, by: 0.25)) { context in
+                    if let af = model.afFrameInOutput, context.date < model.showAFFrameUntil {
+                        RoundedRectangle(cornerRadius: 3)
+                            .strokeBorder(.white.opacity(model.isFocusing ? 0.6 : 0.95), lineWidth: 1.5)
+                            .frame(width: max(af.width * fit.width, 24), height: max(af.height * fit.height, 24))
+                            .position(x: fit.minX + af.midX * fit.width, y: fit.minY + af.midY * fit.height)
+                            .allowsHitTesting(false)
+                            .accessibilityHidden(true)
+                    }
+                }
+            }
+        }
+        .help(model.receivingFrames ? "Click to focus there" : "")
     }
 }
 

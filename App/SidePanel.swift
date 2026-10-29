@@ -1,4 +1,5 @@
 import ReflexCamera
+import ReflexVideo
 import SwiftUI
 
 struct SidePanel: View {
@@ -9,6 +10,8 @@ struct SidePanel: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 28) {
                 ExposureSection(model: model)
+                FocusSection(model: model)
+                ColorSection(model: model)
                 outputSection
                 cameraSection
                 diagnosticsSection
@@ -62,6 +65,29 @@ struct SidePanel: View {
                 .pickerStyle(.segmented)
                 .labelsHidden()
             }
+            labeled("Resolution") {
+                Picker("Resolution", selection: $model.outputScale) {
+                    Text("Native").tag(OutputScale.native)
+                    Text("1080p enhanced").tag(OutputScale.hd1080)
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+                .disabled(!model.upscalerAvailable)
+            }
+            labeled("Sharpening") {
+                HStack(spacing: 8) {
+                    Slider(value: $model.sharpness, in: 0...1)
+                        .labelsHidden()
+                        .accessibilityLabel("Sharpening")
+                    Text(model.sharpness == 0 ? "Off" : String(format: "%.0f%%", model.sharpness * 100))
+                        .monospacedDigit()
+                        .frame(width: 36, alignment: .trailing)
+                }
+            }
+            Text("1080p enhanced upscales on the GPU with MetalFX and sharpens edges. It looks crisper in OBS than a plain resize, but can't add detail the camera didn't capture.")
+                .font(.callout)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
             labeled("Live view quality") {
                 Picker("Live view quality", selection: $model.quality) {
                     ForEach(LiveViewQuality.allCases) { Text($0.label).tag($0) }
@@ -84,7 +110,7 @@ struct SidePanel: View {
             row("Frames", model.receivingFrames ? String(format: "%.1f fps", model.stats.fps) : "–")
             row("USB → screen", model.stats.usbToScreenMs.map { String(format: "%.0f ms", $0) } ?? "–",
                 help: "From a frame arriving over USB to it appearing in the viewfinder.")
-            row("Decode", model.receivingFrames ? String(format: "%.1f ms", model.stats.decodeMs) : "–")
+            row("Decode · GPU", model.receivingFrames ? String(format: "%.1f · %.1f ms", model.stats.decodeMs, model.stats.gpuMs) : "–")
             row("USB traffic", model.receivingFrames ? String(format: "%.1f MB/s · %.0f req/s", model.stats.megabytesPerSecond, model.stats.requestRate) : "–")
             if let result = model.latency.lastResult {
                 row("Glass to glass", String(format: "%.0f ms", result.medianMs),

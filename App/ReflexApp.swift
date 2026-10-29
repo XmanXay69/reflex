@@ -69,6 +69,16 @@ struct ReflexCommands: Commands {
             Picker("Live View Quality", selection: $model.quality) {
                 ForEach(LiveViewQuality.allCases) { Text($0.label).tag($0) }
             }
+            Button("Autofocus") { model.autofocus() }
+                .keyboardShortcut("f", modifiers: .command)
+                .disabled(!model.receivingFrames || model.isFocusing)
+            Button("Quick Setup") { model.quickSetup() }
+                .disabled(model.controls.isEmpty)
+            Button("Save Frame") {
+                if let url = model.saveFrame() { NSWorkspace.shared.activateFileViewerSelecting([url]) }
+            }
+            .keyboardShortcut("s", modifiers: [.command, .shift])
+            .disabled(!model.receivingFrames)
             Divider()
             Button("Measure Latency…") { openWindow(id: "latency") }
                 .keyboardShortcut("l", modifiers: [.command, .shift])

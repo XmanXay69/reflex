@@ -91,6 +91,27 @@ enum Shaders {
         return out;
     }
 
+    // Contrast-adaptive sharpening (after AMD's CAS idea): sharpen more where local contrast is low, less where
+    // it's already high, so edges don't ring. strength 0 = plain copy.
+    fragment float4 sharpenFragment(VertexOut in [[stage_in]],
+                                    texture2d<float> image [[texture(0)]],
+                                    constant float &strength [[buffer(0)]]) {
+        uint2 size = uint2(image.get_width(), image.get_height());
+        uint2 p = uint2(in.position.xy);
+        float3 c = image.read(p).rgb;
+        if (strength <= 0.0) { return float4(c, 1.0); }
+        float3 n = image.read(uint2(p.x, max(p.y, 1u) - 1)).rgb;
+        float3 s = image.read(uint2(p.x, min(p.y + 1, size.y - 1))).rgb;
+        float3 w = image.read(uint2(max(p.x, 1u) - 1, p.y)).rgb;
+        float3 e = image.read(uint2(min(p.x + 1, size.x - 1), p.y)).rgb;
+        float3 mn = min(c, min(min(n, s), min(w, e)));
+        float3 mx = max(c, max(max(n, s), max(w, e)));
+        float3 amp = sqrt(saturate(min(mn, 1.0 - mx) / max(mx, 1e-4)));
+        float3 weight = -amp * mix(0.125, 0.2, saturate(strength));
+        float3 rgb = (c + weight * (n + s + w + e)) / (1.0 + 4.0 * weight);
+        return float4(saturate(rgb), 1.0);
+    }
+
     fragment float4 textureFragment(VertexOut in [[stage_in]], texture2d<float> image [[texture(0)]]) {
         constexpr sampler s(filter::linear, address::clamp_to_edge);
         return image.sample(s, in.uv);
